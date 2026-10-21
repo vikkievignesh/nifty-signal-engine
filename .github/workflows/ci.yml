@@ -1,0 +1,63 @@
+name: CI
+
+# Runs the full pytest suite on every pull request and every push.
+# No secrets, no external API calls, no deployment: the tests use only
+# synthetic data and the packages installed from PyPI below.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: py${{ matrix.python-version }} / ${{ matrix.deps }} deps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+        deps: [lowest, latest]
+        include:
+          # "lowest" = the oldest pandas/numpy that can run on that Python while still
+          # satisfying pyproject.toml (pandas>=2.2, numpy>=1.26). numpy 1.26 has no
+          # Python 3.13 wheels; the first numpy with them is 2.1.0, and the first
+          # pandas with them is 2.2.3. tests/test_ci_config.py keeps these pins
+          # consistent with pyproject.toml.
+          - python-version: "3.11"
+            deps: lowest
+            pins: "pandas==2.2.0 numpy==1.26.0"
+          - python-version: "3.12"
+            deps: lowest
+            pins: "pandas==2.2.0 numpy==1.26.0"
+          - python-version: "3.13"
+            deps: lowest
+            pins: "pandas==2.2.3 numpy==2.1.0"
+          # "latest" = whatever pip resolves from pyproject.toml (no extra pins).
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install project (pyproject.toml) with test extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" ${{ matrix.pins }}
+
+      - name: Show resolved versions
+        run: |
+          python --version
+          python -m pip list --format=freeze | grep -i -E '^(pandas|numpy|pytest|nifty)'
+
+      - name: Run tests
+        run: python -m pytest

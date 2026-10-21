@@ -53,6 +53,24 @@ NIFTY_VOLUME_SOURCE=index_futures python -m nifty_signal_engine
 # or: python -m nifty_signal_engine --csv path/to/your.csv
 ```
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs the full `pytest` suite on every push and pull
+request across Python 3.11, 3.12 and 3.13, each with the lowest and the latest
+pandas/numpy that the project's `pyproject.toml` allows (six jobs). It installs
+with `pip install -e ".[dev]"`, uses no secrets, and makes no network calls
+beyond installing packages from PyPI.
+
+| Python    | `lowest` pins              | `latest`                          |
+|-----------|----------------------------|-----------------------------------|
+| 3.11/3.12 | pandas 2.2.0, numpy 1.26.0 | whatever pip resolves             |
+| 3.13      | pandas 2.2.3, numpy 2.1.0  | whatever pip resolves             |
+
+The 3.13 floor is higher because numpy 1.26 and pandas 2.2.0–2.2.2 have no
+Python 3.13 support. `tests/test_ci_config.py` fails if the workflow drifts from
+`pyproject.toml` (Python versions, pandas/numpy pins, secrets, privileged
+triggers). pandas 2.2.0 prints a harmless pyarrow notice on import.
+
 ## Candle schema
 
 | column      | type                                  | meaning                       |
