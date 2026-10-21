@@ -1,7 +1,7 @@
 """NIFTY Signal Engine — research-first, alert-only intraday signal scaffold.
 
 Nothing in this package places orders. The only network access is the optional,
-read-only FYERS history downloader in ``nifty_signal_engine.fyers``. Signal rules are
+local FYERS tooling in ``nifty_signal_engine.fyers`` (history downloader and login helper). Signal rules are
 unvalidated research scaffolding; no profitability or reliability is claimed.
 """
 

@@ -58,11 +58,21 @@ class HttpResponse:
 Transport = Callable[[str, Mapping[str, str], float], HttpResponse]
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow redirects: urllib would forward credential-bearing headers to the target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def urllib_transport(url: str, headers: Mapping[str, str], timeout: float) -> HttpResponse:
-    """Default transport: one HTTPS GET using the standard library."""
+    """Default transport: one HTTPS GET using the standard library (redirects are not followed)."""
     request = urllib.request.Request(url, headers=dict(headers), method="GET")  # noqa: S310 (https enforced)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        with _OPENER.open(request, timeout=timeout) as response:
             return HttpResponse(response.status, dict(response.headers.items()), response.read())
     except urllib.error.HTTPError as exc:  # non-2xx: still an HTTP response
         return HttpResponse(exc.code, dict(exc.headers.items()) if exc.headers else {}, exc.read())

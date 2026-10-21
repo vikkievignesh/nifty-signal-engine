@@ -6,8 +6,9 @@ five-minute candles.
 > **Status: research scaffold.** No signal rule in this repository has been
 > validated. No profitability or reliability is claimed. The engine does not
 > place orders, stream data or send notifications. The only code that touches the
-> network is the optional, read-only FYERS history downloader (`nifty_signal_engine.fyers`),
-> which runs only when you invoke it.
+> network is the optional, local FYERS tooling in `nifty_signal_engine.fyers` -- the read-only
+> history downloader and the interactive login helper (a loopback callback server plus one
+> token-exchange request) -- which runs only when you invoke it.
 
 ## Project layout
 
@@ -32,7 +33,7 @@ src/nifty_signal_engine/
   logging_config.py   Stdlib logging setup
   synthetic.py        Deterministic synthetic candles for tests/demos
   __main__.py         python -m nifty_signal_engine --csv <file>
-  fyers/              Local-only FYERS history downloader (credentials, client, downloader, CLI)
+  fyers/              Local-only FYERS tools: history downloader, plus login helper (auth, envfile, login)
 tests/                pytest suite
 data/sample/          Synthetic sample CSV (not market data)
 scripts/              generate_sample_data.py
@@ -86,24 +87,59 @@ development so far; the tests use mocked responses only.
 
 1. In the FYERS API dashboard, create an app and note its *App ID*. Enable the
    market-data permission (historical data) for it.
-2. Generate an *access token* with a normal FYERS login (the token needs your
-   login and 2FA, so it cannot be automated here). The official `fyers-apiv3` SDK
-   does this with `SessionModel(...).generate_authcode()` -> open the URL, log in
-   -> copy `auth_code` from the redirect -> `set_token(...)` / `generate_token()`.
-   The SDK is not a dependency of this project; install it separately if you use it.
-   Access tokens expire, so regenerate one when the downloader reports an
-   authentication failure.
-3. Put the two values in a local, git-ignored `.env` file in the repository root
+2. Register `http://127.0.0.1:5000/callback` as the app's redirect URL, exactly as
+   written (see *Logging in* below), and note the app's *App Secret*.
+3. Put your credentials in a local, git-ignored `.env` file in the repository root
    (or export them in your shell), then `chmod 600 .env`:
 
    ```
    FYERS_APP_ID=<your app id>
-   FYERS_ACCESS_TOKEN=<your access token>
+   FYERS_APP_SECRET=<your app secret>   # used only by the login helper
    ```
 
-   Real environment variables take precedence over `.env`. `FYERS_SECRET_KEY` is
-   not needed and should not be stored. Never paste these values into chat, issues
-   or commits.
+   Then run the login helper below, which writes `FYERS_ACCESS_TOKEN` into the same
+   file. Real environment variables take precedence over `.env`. Prefer exporting
+   `FYERS_APP_SECRET` for the one login command over keeping it in a file. The
+   downloader itself never reads the secret. Never paste these values into chat,
+   issues or commits.
+
+**Logging in (local helper; replaces generating the token by hand):**
+
+```bash
+python -m nifty_signal_engine.fyers.login            # add --print-url if no browser can be opened
+```
+
+It follows the FYERS v3 Individual App flow: it opens the FYERS login page, listens
+only on `http://127.0.0.1:5000/callback` (loopback, fixed port, no fallback), checks
+the returned OAuth `state` against a fresh 256-bit random value, exchanges the
+`auth_code` at `/validate-authcode` using `appIdHash = SHA256("app_id:app_secret")`,
+and updates **only** `FYERS_ACCESS_TOKEN` in `.env` (all other lines are preserved;
+file mode forced to `0600`; symlinks, non-regular files, foreign-owned or hard-linked
+files and files git does not ignore are refused; the write is atomic). You complete the
+FYERS login and 2FA in the browser yourself. The app secret, `appIdHash`, auth code and
+access token are never printed or logged, and the login URL is hidden unless you pass
+`--print-url`. Options: `--env-file`, `--timeout` (seconds, max 600), `--print-url`,
+`--no-browser`. Access tokens expire (daily, per FYERS); run it again when the
+downloader reports an authentication failure. It places no orders and runs no trading
+logic.
+
+*Security limitations:* anything running as your user can reach `127.0.0.1:5000` while
+the helper waits and could race the real redirect (a wrong `state` aborts the login,
+and the page shown echoes nothing); the one-shot callback is plain HTTP on loopback
+because that is what the redirect URL uses; a token in `.env` is as safe as your user
+account and disk (consider full-disk encryption); the process holds the secret, code
+and token in memory while it runs; `0600` and ownership checks are POSIX-only (on
+Windows the file mode is not enforced); and checking that `.env` is git-ignored needs
+`git` on the PATH (if git is unavailable the check is skipped).
+
+*Not verified against the live FYERS service* (the official documentation pages could
+not be opened from the development environment and no live login was performed): the
+exact redirect query format and whether FYERS accepts `http://127.0.0.1:5000/callback`
+as a redirect URL. The helper is deliberately strict: it accepts a callback only with a
+matching `state`, exactly one well-formed `auth_code` and no `error`/`error_description`
+parameter, and rejects anything else with a generic message. If your first attempt is
+rejected, check the redirect URL registered on the app and report what FYERS actually
+sends (without pasting any code, state or token).
 
 **Run:**
 

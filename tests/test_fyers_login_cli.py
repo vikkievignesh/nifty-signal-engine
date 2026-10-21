@@ -1,0 +1,225 @@
+import http.client
+import logging
+import os
+import stat
+import threading
+import urllib.parse
+
+import pytest
+
+from nifty_signal_engine.fyers import AuthFlowError, CallbackServer, FyersNetworkError, load_credentials
+from nifty_signal_engine.fyers.login import main
+
+from fyers_auth_helpers import (
+    ACCESS_TOKEN,
+    APP_ID,
+    APP_ID_HASH,
+    APP_SECRET,
+    AUTH_CODE,
+    ScriptedPost,
+    json_resp,
+    token_resp,
+)
+
+ENV_TEXT = (
+    "# my settings\n"
+    f"FYERS_APP_ID={APP_ID}\n"
+    f"FYERS_APP_SECRET={APP_SECRET}\n"
+    "NIFTY_LOG_LEVEL=DEBUG\n"
+    "FYERS_ACCESS_TOKEN=old_TOKEN_0123456789abcdef\n"
+)
+SECRETS = (APP_SECRET, APP_ID_HASH, AUTH_CODE, ACCESS_TOKEN)
+
+
+class Harness:
+    """Fake browser + loopback server on an ephemeral port; nothing leaves 127.0.0.1."""
+
+    def __init__(self, behaviour="ok"):
+        self.behaviour = behaviour
+        self.server = None
+        self.opened_urls = []
+        self.server_created = False
+
+    def server_factory(self):
+        self.server_created = True
+        self.server = CallbackServer(port=0)
+        return self.server
+
+    def open_url(self, url):
+        self.opened_urls.append(url)
+        if self.behaviour == "no-browser":
+            return False
+        state = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["state"][0]
+        if self.behaviour == "silent":
+            return True
+        params = {"ok": {"auth_code": AUTH_CODE, "state": state},
+                  "wrong-state": {"auth_code": AUTH_CODE, "state": "FORGED"},
+                  "denied": {"error": "access_denied", "state": state},
+                  "no-code": {"state": state}}[self.behaviour]
+
+        def visit():
+            conn = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+            conn.request("GET", "/callback?" + urllib.parse.urlencode(params),
+                         headers={"Host": f"127.0.0.1:{self.server.port}"})
+            conn.getresponse().read()
+            conn.close()
+
+        threading.Thread(target=visit, daemon=True).start()
+        return True
+
+
+def run(tmp_path, harness, transport, *extra, env=None, env_text=ENV_TEXT):
+    env_file = tmp_path / ".env"
+    if env_text is not None:
+        env_file.write_text(env_text)
+        env_file.chmod(0o644)  # deliberately loose: the helper must tighten it
+    code = main(["--env-file", str(env_file), *extra], env={} if env is None else env,
+                open_url=harness.open_url, post_transport=transport, server_factory=harness.server_factory)
+    return code, env_file
+
+
+def assert_no_secrets(*texts):
+    for text in texts:
+        for secret in SECRETS:
+            assert secret not in text
+
+
+def test_successful_login_updates_only_the_token(tmp_path, capsys, caplog):
+    transport = ScriptedPost(token_resp())
+    with caplog.at_level(logging.DEBUG):
+        code, env_file = run(tmp_path, Harness("ok"), transport)
+    out = capsys.readouterr()
+    assert code == 0
+    assert env_file.read_text() == ENV_TEXT.replace("old_TOKEN_0123456789abcdef", ACCESS_TOKEN)
+    assert stat.S_IMODE(os.stat(env_file).st_mode) == 0o600
+    (url, headers, body), = transport.calls
+    assert body == {"grant_type": "authorization_code", "appIdHash": APP_ID_HASH, "code": AUTH_CODE}
+    assert "updated" in out.out and "value not shown" in out.out
+    assert_no_secrets(out.out, out.err, caplog.text)
+    # the downloader can use the result straight away
+    assert load_credentials({}, env_file).access_token == ACCESS_TOKEN
+
+
+def test_credentials_can_come_from_the_environment(tmp_path):
+    env = {"FYERS_APP_ID": APP_ID, "FYERS_APP_SECRET": APP_SECRET}
+    code, env_file = run(tmp_path, Harness("ok"), ScriptedPost(token_resp()), env=env, env_text="OTHER=1\n")
+    assert code == 0 and env_file.read_text() == f"OTHER=1\nFYERS_ACCESS_TOKEN={ACCESS_TOKEN}\n"
+    assert "FYERS_APP_SECRET" not in env_file.read_text()  # secrets from the environment are not copied to disk
+
+
+def test_state_mismatch_aborts_without_touching_env_or_exchanging(tmp_path, capsys):
+    transport = ScriptedPost(token_resp())
+    code, env_file = run(tmp_path, Harness("wrong-state"), transport)
+    err = capsys.readouterr().err
+    assert code == 1 and "does not match" in err
+    assert transport.calls == []  # the forged code was never exchanged
+    assert env_file.read_text() == ENV_TEXT
+    assert_no_secrets(err)
+
+
+@pytest.mark.parametrize("behaviour, expect", [("denied", "access_denied"), ("no-code", "did not return")])
+def test_error_callbacks_abort(tmp_path, capsys, behaviour, expect):
+    transport = ScriptedPost(token_resp())
+    code, env_file = run(tmp_path, Harness(behaviour), transport)
+    assert code == 1 and expect in capsys.readouterr().err
+    assert transport.calls == [] and env_file.read_text() == ENV_TEXT
+
+
+@pytest.mark.parametrize("response", [
+    json_resp({"s": "error", "code": -5, "message": f"invalid app id hash {APP_ID_HASH}"}),
+    json_resp({"s": "error", "code": -413, "message": "bad code"}, status=401),
+    json_resp({"s": "ok", "access_token": "tiny"}),
+])
+def test_exchange_failures_leave_env_untouched_and_leak_nothing(tmp_path, capsys, caplog, response):
+    with caplog.at_level(logging.DEBUG):
+        code, env_file = run(tmp_path, Harness("ok"), ScriptedPost(response))
+    out = capsys.readouterr()
+    assert code == 1 and env_file.read_text() == ENV_TEXT
+    assert_no_secrets(out.out, out.err, caplog.text)
+
+
+def test_network_failure_during_exchange(tmp_path, capsys):
+    code, env_file = run(tmp_path, Harness("ok"), ScriptedPost(FyersNetworkError("network error: TimeoutError")))
+    assert code == 1 and "network error" in capsys.readouterr().err
+    assert env_file.read_text() == ENV_TEXT
+
+
+def test_missing_credentials_fail_before_any_server_or_browser(tmp_path, capsys):
+    harness = Harness("ok")
+    code, _ = run(tmp_path, harness, ScriptedPost(token_resp()), env_text=f"FYERS_APP_ID={APP_ID}\n")
+    err = capsys.readouterr().err
+    assert code == 1 and "FYERS_APP_SECRET" in err and APP_ID not in err
+    assert not harness.server_created and harness.opened_urls == []
+
+
+def test_symlinked_env_fails_before_any_server_or_browser(tmp_path, capsys):
+    real = tmp_path / "real.txt"
+    real.write_text(ENV_TEXT)
+    link = tmp_path / ".env"
+    link.symlink_to(real)
+    harness = Harness("ok")
+    code = main(["--env-file", str(link)], env={}, open_url=harness.open_url,
+                post_transport=ScriptedPost(token_resp()), server_factory=harness.server_factory)
+    assert code == 1 and "symbolic link" in capsys.readouterr().err
+    assert not harness.server_created and real.read_text() == ENV_TEXT
+
+
+def test_port_in_use_is_reported(tmp_path, capsys):
+    def busy():
+        raise AuthFlowError("cannot listen on 127.0.0.1:5000 (OSError); is another program using that port?")
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(ENV_TEXT)
+    code = main(["--env-file", str(env_file)], env={}, open_url=lambda u: True,
+                post_transport=ScriptedPost(token_resp()), server_factory=busy)
+    assert code == 1 and "cannot listen" in capsys.readouterr().err
+
+
+def test_timeout(tmp_path, capsys):
+    code, env_file = run(tmp_path, Harness("silent"), ScriptedPost(token_resp()), "--timeout", "0.3")
+    assert code == 1 and "timed out" in capsys.readouterr().err and env_file.read_text() == ENV_TEXT
+
+
+def test_browser_failure_aborts_unless_url_is_printed(tmp_path, capsys):
+    code, _ = run(tmp_path, Harness("no-browser"), ScriptedPost(token_resp()))
+    assert code == 1 and "--print-url" in capsys.readouterr().err
+
+
+def test_login_url_is_hidden_by_default_and_shown_only_on_request(tmp_path, capsys):
+    harness = Harness("ok")
+    run(tmp_path, harness, ScriptedPost(token_resp()))
+    hidden = capsys.readouterr().out
+    state = urllib.parse.parse_qs(urllib.parse.urlsplit(harness.opened_urls[0]).query)["state"][0]
+    assert state not in hidden and "client_id" not in hidden
+
+    harness = Harness("ok")
+    run(tmp_path, harness, ScriptedPost(token_resp()), "--print-url")
+    shown = capsys.readouterr().out
+    assert "client_id=" in shown and "state=" in shown
+    assert_no_secrets(shown)
+
+
+def test_no_browser_requires_print_url(tmp_path, capsys):
+    harness = Harness("ok")
+    code, _ = run(tmp_path, harness, ScriptedPost(token_resp()), "--no-browser")
+    assert code == 1 and harness.opened_urls == []
+
+
+def test_ctrl_c_is_a_clean_cancel(tmp_path, capsys):
+    def interrupted():
+        raise KeyboardInterrupt
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(ENV_TEXT)
+    code = main(["--env-file", str(env_file)], env={}, open_url=lambda u: True,
+                post_transport=ScriptedPost(token_resp()), server_factory=interrupted)
+    assert code == 130 and "cancelled" in capsys.readouterr().err
+
+
+def test_downloader_credential_loading_is_unaffected_by_the_secret(tmp_path):
+    """The downloader never reads FYERS_APP_SECRET, even when it is in the same .env."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(ENV_TEXT)
+    env_file.chmod(0o600)
+    creds = load_credentials({}, env_file)
+    assert APP_SECRET not in repr(creds) and creds.app_id == APP_ID

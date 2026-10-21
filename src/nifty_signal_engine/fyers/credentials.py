@@ -6,18 +6,20 @@ two ``FYERS_*`` names below are read from it. Values are never printed or logged
 ``repr``/``str`` of :class:`Credentials` are masked, and :meth:`Credentials.redact`
 scrubs them from any text (API messages, raw responses) before it is shown or saved.
 
-``FYERS_SECRET_KEY`` is intentionally not used: the downloader only needs an
-already-generated access token, so the app secret never has to be on this machine's
-environment for downloads.
+The downloader needs only ``FYERS_APP_ID`` and ``FYERS_ACCESS_TOKEN``; it never reads
+``FYERS_APP_SECRET``. The local login helper (``fyers.login``) additionally needs
+``FYERS_APP_ID`` and ``FYERS_APP_SECRET`` (see :class:`AuthCredentials`) and then
+writes only ``FYERS_ACCESS_TOKEN`` back to ``.env``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 APP_ID_VAR = "FYERS_APP_ID"
 ACCESS_TOKEN_VAR = "FYERS_ACCESS_TOKEN"
+APP_SECRET_VAR = "FYERS_APP_SECRET"
 REDACTED = "***"
 
 _KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -56,6 +59,62 @@ class Credentials:
     def redact(self, text: str) -> str:
         """Remove the token and app id from ``text``."""
         for secret in (self.access_token, self.app_id):
+            text = text.replace(secret, REDACTED)
+        return text
+
+
+class SecretStr:
+    """Holds a secret (auth code, access token) so it cannot be printed or logged by accident.
+
+    ``repr``/``str``/f-strings show ``***``; call :meth:`reveal` only where the value
+    must actually be used (the token exchange request, the ``.env`` write).
+    """
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def reveal(self) -> str:
+        return self._value
+
+    def __repr__(self) -> str:
+        return f"SecretStr('{REDACTED}')"
+
+    __str__ = __repr__
+
+    def __bool__(self) -> bool:
+        return bool(self._value)
+
+    def __reduce__(self):
+        raise TypeError("SecretStr cannot be pickled")
+
+
+@dataclass(frozen=True, repr=False)
+class AuthCredentials:
+    """App id and app secret for the login helper only (never used by the downloader)."""
+
+    app_id: str
+    app_secret: str
+
+    def __post_init__(self) -> None:
+        for name, value in (("app id", self.app_id), ("app secret", self.app_secret)):
+            if not value:
+                raise CredentialsError(f"{name} is empty")
+            if _BAD_CHARS.search(value):
+                raise CredentialsError(f"{name} contains whitespace or control characters")
+
+    def __repr__(self) -> str:
+        return f"AuthCredentials(app_id='{REDACTED}', app_secret='{REDACTED}')"
+
+    @property
+    def app_id_hash(self) -> str:
+        """``SHA256(app_id:app_secret)`` as lowercase hex, as FYERS v3 ``validate-authcode`` requires."""
+        return hashlib.sha256(f"{self.app_id}:{self.app_secret}".encode()).hexdigest()
+
+    def redact(self, text: str) -> str:
+        """Remove the secret, the derived hash and the app id from ``text``."""
+        for secret in (self.app_secret, self.app_id_hash, self.app_id):
             text = text.replace(secret, REDACTED)
         return text
 
@@ -94,11 +153,8 @@ def _warn_if_readable_by_others(path: Path) -> None:
         logger.warning("%s is accessible by other users; run: chmod 600 %s", path, path)
 
 
-def load_credentials(
-    env: Mapping[str, str] | None = None,
-    dotenv_path: str | Path = ".env",
-) -> Credentials:
-    """Load credentials from ``env`` (default ``os.environ``), falling back to ``.env``."""
+def _source_lookup(env: Mapping[str, str] | None, dotenv_path: str | Path) -> Callable[[str], str | None]:
+    """Return ``lookup(name)``: real environment first, then the ``.env`` file."""
     env = os.environ if env is None else env
     file_values: dict[str, str] = {}
     path = Path(dotenv_path)
@@ -113,11 +169,35 @@ def load_credentials(
         value = (env.get(name) or "").strip() or file_values.get(name, "").strip()
         return value or None
 
-    app_id, token = lookup(APP_ID_VAR), lookup(ACCESS_TOKEN_VAR)
-    missing = [n for n, v in ((APP_ID_VAR, app_id), (ACCESS_TOKEN_VAR, token)) if not v]
+    return lookup
+
+
+def _require(names_values: tuple[tuple[str, str | None], ...]) -> None:
+    missing = [name for name, value in names_values if not value]
     if missing:
         raise MissingCredentialsError(
             f"missing {', '.join(missing)}: set it as an environment variable or in a local, "
             "git-ignored .env file (see README)"
         )
+
+
+def load_credentials(
+    env: Mapping[str, str] | None = None,
+    dotenv_path: str | Path = ".env",
+) -> Credentials:
+    """Load downloader credentials from ``env`` (default ``os.environ``), falling back to ``.env``."""
+    lookup = _source_lookup(env, dotenv_path)
+    app_id, token = lookup(APP_ID_VAR), lookup(ACCESS_TOKEN_VAR)
+    _require(((APP_ID_VAR, app_id), (ACCESS_TOKEN_VAR, token)))
     return Credentials(app_id=app_id, access_token=token)
+
+
+def load_auth_credentials(
+    env: Mapping[str, str] | None = None,
+    dotenv_path: str | Path = ".env",
+) -> AuthCredentials:
+    """Load the app id and app secret for the login helper (environment first, then ``.env``)."""
+    lookup = _source_lookup(env, dotenv_path)
+    app_id, secret = lookup(APP_ID_VAR), lookup(APP_SECRET_VAR)
+    _require(((APP_ID_VAR, app_id), (APP_SECRET_VAR, secret)))
+    return AuthCredentials(app_id=app_id, app_secret=secret)

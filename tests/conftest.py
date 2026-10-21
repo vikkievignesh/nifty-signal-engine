@@ -31,3 +31,27 @@ def make_candles(day: str, closes, *, start: str = "09:15", volume=None, spread:
 @pytest.fixture
 def synthetic() -> pd.DataFrame:
     return generate_synthetic_candles(n_sessions=6, seed=11)
+
+
+@pytest.fixture(autouse=True)
+def _no_external_network(monkeypatch):
+    """No test may open a non-loopback connection (e.g. to FYERS), even by accident."""
+    import socket
+
+    real_connect = socket.socket.connect
+    real_getaddrinfo = socket.getaddrinfo
+    loopback = {"127.0.0.1", "::1", "localhost"}
+
+    def guarded_connect(self, address, *args, **kwargs):
+        host = address[0] if isinstance(address, tuple) else address
+        if host not in loopback:
+            raise RuntimeError(f"test attempted a non-loopback connection to {host!r}")
+        return real_connect(self, address, *args, **kwargs)
+
+    def guarded_getaddrinfo(host, *args, **kwargs):
+        if host not in loopback:
+            raise RuntimeError(f"test attempted DNS resolution of {host!r}")
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
