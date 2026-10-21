@@ -16,7 +16,18 @@ class MissingCredentialsError(CredentialsError):
 
 
 class FyersNetworkError(FyersError):
-    """The request failed before an HTTP response was received (DNS, TLS, timeout)."""
+    """The request failed before an HTTP response was received (DNS, TLS, timeout).
+
+    ``category`` is one of ``dns``, ``connection``, ``tls_certificate``, ``tls``, ``timeout``,
+    ``protocol``, ``other`` or ``unknown``; ``request_sent`` says whether FYERS may have
+    received the request (``no``, ``maybe`` or ``unknown``). The message is built from fixed
+    wording only, never from raw exception text.
+    """
+
+    def __init__(self, message: str, *, category: str = "unknown", request_sent: str = "unknown") -> None:
+        super().__init__(message)
+        self.category = category
+        self.request_sent = request_sent
 
 
 class FyersApiError(FyersError):

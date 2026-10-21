@@ -329,3 +329,40 @@ def test_busy_custom_port_fails_once_without_fallback_and_leaves_env_untouched(t
     assert code == 1 and calls == [5001]  # one attempt on the requested port only
     assert "127.0.0.1:5001" in capsys.readouterr().err
     assert opened == [] and env_file.read_text() == ENV_TEXT
+
+
+# --- network failures during the token exchange (diagnostics) ---------------------------------
+
+def _network_failure(kind):
+    import errno
+    import ssl
+    import urllib.error
+
+    from nifty_signal_engine.fyers.netdiag import network_error_from
+
+    if kind == "certificate":
+        cert = ssl.SSLCertVerificationError(1, f"raw text with {AUTH_CODE} and {APP_SECRET}")
+        cert.verify_code = 20
+        return network_error_from(urllib.error.URLError(cert))
+    if kind == "timeout":
+        return network_error_from(TimeoutError(f"raw {AUTH_CODE}"))
+    return network_error_from(urllib.error.URLError(OSError(errno.ECONNREFUSED, f"raw {APP_ID_HASH}")))
+
+
+@pytest.mark.parametrize("kind, category, must_say", [
+    ("certificate", "tls_certificate", ["Install Certificates.command", "auth code was not used", "diagnose"]),
+    ("timeout", "timeout", ["may already be used up", "Run the login again"]),
+    ("refused", "connection", ["ECONNREFUSED", "auth code was not used"]),
+])
+def test_exchange_network_failures_are_classified_actionable_and_leak_nothing(tmp_path, capsys, caplog, kind,
+                                                                              category, must_say):
+    transport = ScriptedPost(_network_failure(kind))
+    with caplog.at_level(logging.DEBUG):
+        code, env_file = run(tmp_path, Harness("ok"), transport)
+    out = capsys.readouterr()
+    assert code == 1 and len(transport.calls) == 1  # the single-use code is never retried
+    assert f"network error [{category}]" in out.err
+    for phrase in must_say:
+        assert phrase in out.err
+    assert env_file.read_text() == ENV_TEXT  # nothing was saved
+    assert_no_secrets(out.out, out.err, caplog.text)

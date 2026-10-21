@@ -31,6 +31,7 @@ contain the auth code) is disabled. Nothing here places orders or trades.
 from __future__ import annotations
 
 import hmac
+import http.client
 import http.server
 import json
 import logging
@@ -46,7 +47,8 @@ from typing import Any
 
 from .client import _OPENER, HttpResponse
 from .credentials import REDACTED, AuthCredentials, SecretStr
-from .errors import AuthFlowError, FyersApiError, FyersAuthError, FyersNetworkError
+from .errors import AuthFlowError, FyersApiError, FyersAuthError
+from .netdiag import network_error_from
 
 logger = logging.getLogger(__name__)
 
@@ -312,8 +314,8 @@ def urllib_post_transport(url: str, headers: Mapping[str, str], body: bytes, tim
             return HttpResponse(response.status, dict(response.headers.items()), response.read())
     except urllib.error.HTTPError as exc:
         return HttpResponse(exc.code, dict(exc.headers.items()) if exc.headers else {}, exc.read())
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise FyersNetworkError(f"network error: {type(exc).__name__}") from None
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
+        raise network_error_from(exc) from None  # classified, fixed wording; never str(exc)
 
 
 def exchange_auth_code(

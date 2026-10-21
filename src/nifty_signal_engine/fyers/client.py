@@ -22,6 +22,7 @@ Behaviour
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import time
@@ -34,6 +35,7 @@ from typing import Any
 
 from .credentials import Credentials
 from .errors import FyersApiError, FyersAuthError, FyersNetworkError, FyersRateLimitError
+from .netdiag import PERMANENT_CATEGORIES, network_error_from
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +78,8 @@ def urllib_transport(url: str, headers: Mapping[str, str], timeout: float) -> Ht
             return HttpResponse(response.status, dict(response.headers.items()), response.read())
     except urllib.error.HTTPError as exc:  # non-2xx: still an HTTP response
         return HttpResponse(exc.code, dict(exc.headers.items()) if exc.headers else {}, exc.read())
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise FyersNetworkError(f"network error: {type(exc).__name__}") from None
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
+        raise network_error_from(exc) from None  # classified, fixed wording; never str(exc)
 
 
 class _Retry(Exception):
@@ -175,7 +177,12 @@ class FyersHistoryClient:
         try:
             response = self._transport(url, headers, self._timeout)
         except FyersNetworkError as exc:
-            raise _Retry(FyersNetworkError(self._safe(str(exc))), "network error") from None
+            # Built from fixed wording by netdiag, so no length cap (it would cut the remediation hint);
+            # credential redaction is kept as a safety net.
+            error = FyersNetworkError(self.redact(str(exc)), category=exc.category, request_sent=exc.request_sent)
+            if exc.category in PERMANENT_CATEGORIES:  # a bad trust chain does not fix itself: fail now
+                raise error from None
+            raise _Retry(error, f"network error ({exc.category})") from None
 
         text = response.body.decode("utf-8", errors="replace")
         payload = _parse_json(text)

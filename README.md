@@ -149,6 +149,38 @@ custom port also prints a reminder. Nothing else changes: the host stays `127.0.
 the OAuth `state` check and all other protections apply on every port. Going back to the
 default needs the dashboard redirect URL set to `http://127.0.0.1:5000/callback` again.
 
+**Troubleshooting `network error [category]` (login or download).** Network failures are
+classified without ever printing raw exception text, so the message cannot contain an auth
+code, secret, token, request body or credential-bearing URL:
+
+| category | meaning | was the request sent? |
+|---|---|---|
+| `tls_certificate` | Python could not verify FYERS's certificate chain | no -- the auth code is unused |
+| `tls` | TLS handshake failed for another reason | no |
+| `dns` | host name did not resolve | no |
+| `connection` | refused/unreachable (nothing sent) or dropped mid-request (maybe sent) | no / maybe |
+| `timeout` | no answer in time | unknown -- the single-use auth code may be used up |
+| `protocol` | malformed or truncated HTTP response | maybe |
+
+HTTP-level problems are different: they arrive as an HTTP status (for example `HTTP 403`) in
+the error, not as a `network error`. `curl` working while Python fails usually means the two
+use different certificate stores: `curl` trusts the operating system's, while Python's
+`urllib` uses its own CA bundle. On macOS builds from python.org that bundle is empty until you
+run the *Install Certificates.command* that ships with Python, or `pip install certifi` and
+`export SSL_CERT_FILE=$(python -c 'import certifi; print(certifi.where())')`. A proxy or
+antivirus that re-signs HTTPS traffic causes the same symptom. Never disable certificate
+verification. To check each layer separately, with no credentials involved:
+
+```bash
+python -m nifty_signal_engine.fyers.diagnose
+```
+
+It tests DNS, TCP, TLS (with full certificate verification) and one plain HTTPS GET of the
+host root of `api-t1.fyers.in` (not the token-exchange endpoint, with no headers or body), and
+reports Python's trust setup as yes/no facts only (no paths or values). Certificate failures
+are not retried; other transient failures are retried by the downloader but never by the
+login, because an auth code can be used only once.
+
 *Security limitations:* anything running as your user can reach `127.0.0.1:<port>` while
 the helper waits and could race the real redirect (a wrong `state` aborts the login,
 and the page shown echoes nothing); the one-shot callback is plain HTTP on loopback
