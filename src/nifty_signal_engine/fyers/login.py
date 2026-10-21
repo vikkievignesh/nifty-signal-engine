@@ -33,6 +33,7 @@ from .auth import (
     generate_state,
     urllib_post_transport,
     validate_callback_port,
+    validate_user_agent,
 )
 from .credentials import ACCESS_TOKEN_VAR, AuthCredentials, load_auth_credentials, lookup_setting
 from .errors import AuthFlowError, FyersError
@@ -45,6 +46,7 @@ def run_login(
     *,
     env_file: str | Path = ".env",
     port: int = CALLBACK_PORT,
+    user_agent: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     open_url: Callable[[str], bool] = webbrowser.open,
     no_browser: bool = False,
@@ -55,6 +57,7 @@ def run_login(
 ) -> None:
     """Run one login attempt; on success ``FYERS_ACCESS_TOKEN`` is updated in ``env_file``."""
     port = validate_callback_port(port)
+    user_agent = validate_user_agent(user_agent) if user_agent is not None else None  # fail before any login
     envfile.preflight(env_file)  # fail before the user logs in, not after
     state = generate_state()
     with server_factory(port) as server:  # exactly one bind attempt; no fallback port
@@ -62,6 +65,9 @@ def run_login(
         url = build_login_url(credentials.app_id, state, redirect_uri=redirect_uri)
         say(f"Listening on {redirect_uri}. That exact URL must be saved as the redirect URL of your "
             "FYERS app.")
+        if user_agent is not None:
+            say("NOTE: EXPERIMENTAL User-Agent override is active for the token exchange (diagnostic only; "
+                f"it is not a fix): {user_agent}")
         if port != CALLBACK_PORT:
             say(f"NOTE: custom port {port}. Before continuing, update the redirect URL in the FYERS "
                 f"dashboard to exactly {redirect_uri} and save it; otherwise FYERS will reject the login.")
@@ -81,7 +87,7 @@ def run_login(
             raise AuthFlowError("--no-browser needs --print-url, otherwise there is no way to start the login")
         say(f"Waiting up to {timeout:.0f}s for the callback on {CALLBACK_PATH} ...")
         auth_code = server.wait_for_auth_code(state, timeout)
-    token = exchange_auth_code(credentials, auth_code, transport=post_transport)
+    token = exchange_auth_code(credentials, auth_code, transport=post_transport, user_agent=user_agent)
     envfile.set_env_value(env_file, ACCESS_TOKEN_VAR, token.reveal())
     say(f"{ACCESS_TOKEN_VAR} updated in {env_file} (value not shown, file mode 0600). "
         "Access tokens expire; run this command again when the downloader reports an authentication failure.")
@@ -108,6 +114,9 @@ def main(
     parser.add_argument("--print-url", action="store_true",
                         help="print the login URL (contains the app id and one-time state; never the secret)")
     parser.add_argument("--no-browser", action="store_true", help="do not try to open a browser")
+    parser.add_argument("--user-agent", type=str, default=None, metavar="VALUE",
+                        help="EXPERIMENTAL, diagnostic only: send this User-Agent with the token-exchange request "
+                             "(printable ASCII, max 200 chars). Default: unchanged (urllib's own).")
     parser.add_argument("--check", action="store_true",
                         help="offline: describe the token-exchange request and sanity-check the App ID format "
                              "and redirect URI; no server, no network, no secret printed")
@@ -119,10 +128,12 @@ def main(
         credentials = load_auth_credentials(env, args.env_file)
         configured = args.port if args.port is not None else lookup_setting(CALLBACK_PORT_VAR, env, args.env_file)
         port = validate_callback_port(configured) if configured is not None else CALLBACK_PORT
+        user_agent = validate_user_agent(args.user_agent) if args.user_agent is not None else None
         if args.check:
-            print("\n".join(describe_exchange_request(credentials, port)))
+            print("\n".join(describe_exchange_request(credentials, port, user_agent)))
             return 0
-        run_login(credentials, env_file=args.env_file, port=port, timeout=args.timeout, open_url=open_url,
+        run_login(credentials, env_file=args.env_file, port=port, user_agent=user_agent,
+                  timeout=args.timeout, open_url=open_url,
                   no_browser=args.no_browser, print_url=args.print_url,
                   post_transport=post_transport, server_factory=server_factory)
     except KeyboardInterrupt:

@@ -204,6 +204,25 @@ changes the hash), flags an App ID that does not look like `<ID>-<digits>` or th
 characters, and prints the redirect URI that will be sent, which must equal the saved dashboard value
 character for character. Auth codes are single-use and short-lived: always start a fresh login.
 
+**Experiment: explicit User-Agent for the token exchange (diagnostic only, off by default).**
+By default the exchange request sets only `Content-Type: application/json`, and urllib adds its
+own `User-Agent: Python-urllib/<python version>` (the official SDK, built on `requests`, sends a
+different one). Whether FYERS reacts to that header is **unknown**: this option exists only to
+find out, in one controlled attempt, and is not a fix. To send a different `User-Agent` for a
+single login, and nothing else changed (same URL, same JSON body, same other headers, no
+retries):
+
+```bash
+python -m nifty_signal_engine.fyers.login --port 5001 --user-agent "nifty-signal-engine-experiment/0.1"
+python -m nifty_signal_engine.fyers.login --check --port 5001 --user-agent "nifty-signal-engine-experiment/0.1"   # offline preview
+```
+
+The value must be 1-200 printable ASCII characters (CR/LF and other control characters are refused
+before anything is sent). It applies only to the token exchange, never to the downloader, and is not
+stored anywhere: dropping the flag restores the default. The login prints a note whenever the
+override is active. Compare the outcome of one attempt with and without the flag; a different
+result is evidence, an identical one rules this header out.
+
 *Security limitations:* anything running as your user can reach `127.0.0.1:<port>` while
 the helper waits and could race the real redirect (a wrong `state` aborts the login,
 and the page shown echoes nothing); the one-shot callback is plain HTTP on loopback

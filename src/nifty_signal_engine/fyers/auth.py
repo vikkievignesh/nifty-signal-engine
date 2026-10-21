@@ -101,6 +101,7 @@ _MAX_DIAGNOSTIC_CHARS = 80
 _MAX_API_MESSAGE_CHARS = 120
 _API_MESSAGE_KEYS = ("message", "error_description", "error", "detail")  # the only body fields ever read
 _OPAQUE_RUN = re.compile(r"[A-Za-z0-9._~+/=-]{24,}")  # hashes, JWTs, long codes: never shown
+_USER_AGENT_RE = re.compile(r"[\x20-\x7e]{1,200}")  # printable ASCII only: no CR/LF, so no header injection
 _APP_ID_SHAPE = re.compile(r"[A-Za-z0-9]+-[0-9]+")  # FYERS dashboard format, e.g. "ABCDE12345-100"
 
 PostTransport = Callable[[str, Mapping[str, str], bytes, float], HttpResponse]
@@ -402,7 +403,21 @@ def summarise_response(response: HttpResponse, scrub: Callable[[str], str]) -> R
     return ResponseSummary("json-object", media_type, len(raw), _as_int(payload.get("code")), message)
 
 
-def describe_exchange_request(credentials: AuthCredentials, port: int) -> list[str]:
+def validate_user_agent(value: object) -> str:
+    """Return ``value`` (trimmed) if it is a safe header value, else raise.
+
+    EXPERIMENTAL / diagnostic only: an explicit ``User-Agent`` for the token-exchange request.
+    Printable ASCII, 1-200 characters; CR/LF and other control characters are refused.
+    """
+    if not isinstance(value, str):
+        raise AuthFlowError("user agent must be text")
+    text = value.strip()
+    if not _USER_AGENT_RE.fullmatch(text):
+        raise AuthFlowError("user agent must be 1-200 printable ASCII characters")
+    return text
+
+
+def describe_exchange_request(credentials: AuthCredentials, port: int, user_agent: str | None = None) -> list[str]:
     """Offline description of the token-exchange request. Sends nothing; prints no secret or hash."""
     app_id, secret = credentials.app_id, credentials.app_secret
     odd = re.search(r"[^A-Za-z0-9_-]", app_id) is not None
@@ -411,6 +426,8 @@ def describe_exchange_request(credentials: AuthCredentials, port: int) -> list[s
         "Token exchange request (offline check; nothing is sent):",
         f"  request     : POST {AUTH_BASE_URL}{VALIDATE_AUTHCODE_PATH}",
         "  header      : Content-Type: application/json",
+        "  User-Agent  : " + (f"{user_agent}   (EXPERIMENTAL override, set with --user-agent)" if user_agent
+                              else "the urllib default, Python-urllib/<python version> (no override)"),
         f'  JSON fields : grant_type="{GRANT_TYPE}", appIdHash=<64 hex chars>, code=<auth code from the callback>',
         '  appIdHash   : SHA-256 over "<App ID>:<App Secret>" -- the full App ID exactly as the FYERS dashboard shows it',
         "App ID checks (the value is never printed):",
@@ -432,8 +449,14 @@ def exchange_auth_code(
     transport: PostTransport = urllib_post_transport,
     base_url: str = AUTH_BASE_URL,
     timeout: float = 30.0,
+    user_agent: str | None = None,
 ) -> SecretStr:
-    """Exchange a single-use ``auth_code`` for an access token. Never retried."""
+    """Exchange a single-use ``auth_code`` for an access token. Never retried.
+
+    ``user_agent`` is an EXPERIMENTAL, opt-in diagnostic. By default (``None``) no ``User-Agent``
+    header is set here and urllib adds its own ``Python-urllib/<version>``; the request body,
+    URL and other headers are identical either way.
+    """
     if not base_url.startswith("https://"):
         raise ValueError("base_url must be https:// so the app secret hash is never sent in clear text")
     code = auth_code.reveal()
@@ -446,8 +469,10 @@ def exchange_auth_code(
         "appIdHash": credentials.app_id_hash,
         "code": code,
     }).encode()
-    response = transport(f"{base_url.rstrip('/')}{VALIDATE_AUTHCODE_PATH}",
-                         {"Content-Type": "application/json"}, body, timeout)
+    headers = {"Content-Type": "application/json"}
+    if user_agent is not None:
+        headers["User-Agent"] = validate_user_agent(user_agent)
+    response = transport(f"{base_url.rstrip('/')}{VALIDATE_AUTHCODE_PATH}", headers, body, timeout)
 
     summary = summarise_response(response, scrub)
     try:

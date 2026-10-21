@@ -392,3 +392,62 @@ def test_http_403_during_login_is_explained_safely_and_nothing_is_saved(tmp_path
         assert fragment not in out.err
     assert env_file.read_text() == ENV_TEXT
     assert_no_secrets(out.out, out.err, caplog.text)
+
+
+# --- EXPERIMENTAL --user-agent (diagnostic only) -----------------------------------------------
+
+EXPERIMENT_UA = "nifty-signal-engine-experiment/0.1"
+
+
+def test_login_default_sends_no_user_agent_header_and_prints_no_experiment_note(tmp_path, capsys):
+    transport = ScriptedPost(token_resp())
+    code, _ = run(tmp_path, Harness("ok"), transport)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert transport.calls[0][1] == {"Content-Type": "application/json"}
+    assert "EXPERIMENTAL" not in out
+
+
+def test_login_with_user_agent_sends_it_only_on_the_exchange_and_says_so(tmp_path, capsys):
+    transport = ScriptedPost(token_resp())
+    code, env_file = run(tmp_path, Harness("ok"), transport, "--user-agent", EXPERIMENT_UA)
+    out = capsys.readouterr()
+    assert code == 0
+    assert transport.calls[0][1] == {"Content-Type": "application/json", "User-Agent": EXPERIMENT_UA}
+    assert transport.calls[0][2] == {"grant_type": "authorization_code", "appIdHash": APP_ID_HASH, "code": AUTH_CODE}
+    assert "EXPERIMENTAL User-Agent override" in out.out and "not a fix" in out.out and EXPERIMENT_UA in out.out
+    assert_no_secrets(out.out, out.err)
+    assert ACCESS_TOKEN in env_file.read_text()
+
+
+@pytest.mark.parametrize("value", ["bad\r\nX-Injected: 1", "café", "x" * 201, "   "])
+def test_login_rejects_an_unsafe_user_agent_before_any_server_or_browser(tmp_path, capsys, value):
+    harness = Harness("ok")
+    transport = ScriptedPost(token_resp())
+    code, env_file = run(tmp_path, harness, transport, "--user-agent", value)
+    assert code == 1 and "user agent" in capsys.readouterr().err
+    assert not harness.server_created and harness.opened_urls == [] and transport.calls == []
+    assert env_file.read_text() == ENV_TEXT
+
+
+def test_login_403_with_override_is_still_summarised_safely(tmp_path, capsys):
+    transport = ScriptedPost(__import__("nifty_signal_engine.fyers", fromlist=["HttpResponse"]).HttpResponse(
+        403, {"Content-Type": "text/plain"}, b"Forbidden by edge"))
+    code, env_file = run(tmp_path, Harness("ok"), transport, "--user-agent", EXPERIMENT_UA)
+    err = capsys.readouterr().err
+    assert code == 1 and len(transport.calls) == 1
+    assert "HTTP 403" in err and "a plain-text body (content not shown)" in err and "Forbidden by edge" not in err
+    assert env_file.read_text() == ENV_TEXT
+
+
+def test_check_shows_the_user_agent_without_starting_anything(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    calls = []
+    for argv, expected in ((["--check"], "the urllib default"),
+                           (["--check", "--user-agent", EXPERIMENT_UA], f"{EXPERIMENT_UA}   (EXPERIMENTAL")):
+        code = main(["--env-file", str(env_file), *argv], env={"FYERS_APP_ID": APP_ID, "FYERS_APP_SECRET": APP_SECRET},
+                    open_url=calls.append, post_transport=lambda *a: calls.append("net"),
+                    server_factory=lambda port: calls.append("server"))
+        assert code == 0 and expected in capsys.readouterr().out
+    assert calls == []
