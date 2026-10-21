@@ -23,3 +23,6 @@ credentials*.json
 # Local market data (only synthetic samples are committed)
 data/raw/
 data/local/
+# FYERS downloader output: CSVs, metadata and raw API responses
+data/local/fyers/
+data/downloads/

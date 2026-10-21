@@ -1,7 +1,8 @@
 """Settings loaded from environment variables (prefix ``NIFTY_``).
 
-No credentials are read or stored here. Future broker/API credentials must come
-from the environment or a secret manager, never from source files.
+No credentials are read or stored here (the FYERS downloader has its own
+``fyers.credentials`` module). Credentials must come from the environment or a
+secret manager, never from source files.
 """
 
 from __future__ import annotations

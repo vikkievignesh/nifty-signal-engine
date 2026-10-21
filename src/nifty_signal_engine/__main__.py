@@ -1,7 +1,7 @@
 """Command line: ``python -m nifty_signal_engine --csv path``.
 
 Loads a CSV, builds features and regimes, and runs the UNVALIDATED example rules.
-Prints research output only; no orders, no network access.
+Prints research output only; no orders, no network access (the FYERS downloader is a separate, opt-in command).
 """
 
 from __future__ import annotations
