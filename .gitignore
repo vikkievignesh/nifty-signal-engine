@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+
+# Secrets and local configuration — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials*.json
+*access_token*
+
+# Local market data (only synthetic samples are committed)
+data/raw/
+data/local/
