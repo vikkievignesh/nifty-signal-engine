@@ -106,6 +106,11 @@ current session).
 * The state machine processes one completed candle at a time and rejects
   out-of-order candles; breakout, retest and confirmation occur on distinct
   candles.
+* `build_feature_frame` validates its input and rejects unordered or duplicated
+  candles; `compute_cpr` refuses unordered candles (a swapped pair inside a
+  session would otherwise silently change the next session's CPR).
+* Signal rules only see the explicit `pipeline.FEATURE_COLUMNS` allow-list, so
+  extra columns in a research frame (e.g. forward returns) cannot leak into rules.
 * Tests assert prefix invariance: features and alerts computed on candles
   `[0, t]` equal those computed on the full data truncated at t, and shocking
   future candles leaves past features unchanged.
@@ -127,13 +132,15 @@ Rules plug in through the protocols in `signals/interfaces.py`. The rules in
 `signals/example_rules.py` (CPR cross, level retest, retest-extreme
 confirmation, close-back invalidation) are **placeholders** so the scaffold runs
 end to end. Alerts have `validated=False` and an expiry
-(`NIFTY_SM_ALERT_TTL_BARS`).
+(`NIFTY_SM_ALERT_TTL_BARS`), capped at the 15:30 close unless
+`NIFTY_SM_EXPIRE_AT_SESSION_END=false`. The machine tracks one setup at a time.
 
 ## Configuration
 
 All settings are environment variables with the `NIFTY_` prefix; see
 `.env.example` for the full list and defaults. The engine does not auto-load
-`.env` files. Invalid values raise `ConfigError` at start-up.
+`.env` files. Invalid values (non-numeric, non-finite, negative thresholds, or a
+minimum-RVOL rule without a traded-volume source) raise `ConfigError` at start-up.
 
 ## Credentials
 
@@ -148,4 +155,14 @@ files and token files are git-ignored.
 * Daily H/L/C for CPR are derived from the 5-minute candles by default; NSE's
   official close can differ. Pass official values via `compute_cpr(daily=...)`.
 * Moving averages run continuously across sessions (no daily reset).
+* A previous session with fewer than 75 candles (half-days, special sessions, data
+  holes) gives NaN CPR, and therefore UNKNOWN regime, for the following session.
+* Moving averages and the regime slope run across the overnight gap; rolling RVOL
+  compares the open with the previous afternoon; time-of-day RVOL counts
+  observations per slot, so a missing candle widens its calendar lookback.
+  Futures contract rollovers are not handled.
+* Processing is batch (whole frame). A live feed would need incremental feature
+  computation; recomputing on every candle is O(n) per candle.
+* Tested on Python 3.13 with pandas 2.2.3/numpy 2.1.3 and pandas 3.0.6/numpy 2.5.4.
+  Python 3.11/3.12 and numpy 1.26 (declared lower bounds) are untested. No CI yet.
 * Sample data is synthetic and says nothing about real market behaviour.

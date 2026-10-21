@@ -66,6 +66,8 @@ def compute_cpr(
     IST session date (midnight) with ``high``, ``low``, ``close`` columns and is
     assumed complete. Each session uses the latest ``daily`` row strictly before it.
     """
+    if not candles[TIMESTAMP_COL].is_monotonic_increasing or candles[TIMESTAMP_COL].duplicated().any():
+        raise ValueError("candles must be in strictly ascending time order to derive session closes")
     if daily is None:
         daily = daily_hlc(candles)
         complete = daily["n_candles"] >= min_session_candles

@@ -25,12 +25,17 @@ def parse_timestamps(raw: pd.Series, naive_timezone: ZoneInfo = IST) -> pd.Serie
     """
     text = raw.astype(str).str.strip()
     has_offset = text.str.contains(_OFFSET_PATTERN, regex=True)
-    if has_offset.all():
-        parsed = pd.to_datetime(text, format="ISO8601", utc=True)
-    elif not has_offset.any():
-        parsed = pd.to_datetime(text, format="ISO8601").dt.tz_localize(naive_timezone)
-    else:
-        raise CandleValidationError("timestamp column mixes values with and without UTC offsets")
+    try:
+        if has_offset.all():
+            parsed = pd.to_datetime(text, format="ISO8601", utc=True)
+        elif not has_offset.any():
+            parsed = pd.to_datetime(text, format="ISO8601").dt.tz_localize(naive_timezone)
+        else:
+            raise CandleValidationError("timestamp column mixes values with and without UTC offsets")
+    except CandleValidationError:
+        raise
+    except ValueError as exc:
+        raise CandleValidationError(f"unparseable timestamps (ISO-8601 required): {str(exc).splitlines()[0]}") from exc
     return parsed.dt.tz_convert(IST)
 
 
@@ -48,14 +53,23 @@ def load_candles_csv(
     they are fixed at the source rather than hidden.
     """
     path = Path(path)
-    raw = pd.read_csv(path)
+    try:
+        raw = pd.read_csv(path)
+    except pd.errors.EmptyDataError as exc:
+        raise CandleValidationError(f"{path}: file is empty") from exc
     raw.columns = [str(c).strip().lower() for c in raw.columns]
+    duplicated = sorted(set(raw.columns[raw.columns.duplicated()]))
+    if duplicated:
+        raise CandleValidationError(f"{path}: duplicate column names after lower-casing: {duplicated}")
 
     missing = [c for c in (TIMESTAMP_COL, *OHLC_COLS) if c not in raw.columns]
     if missing:
         raise CandleValidationError(f"{path}: missing columns {missing}")
 
-    df = pd.DataFrame({TIMESTAMP_COL: parse_timestamps(raw[TIMESTAMP_COL], naive_timezone)})
+    try:
+        df = pd.DataFrame({TIMESTAMP_COL: parse_timestamps(raw[TIMESTAMP_COL], naive_timezone)})
+    except CandleValidationError as exc:
+        raise CandleValidationError(f"{path}: {exc}") from exc
     for col in OHLC_COLS:
         df[col] = pd.to_numeric(raw[col], errors="coerce").astype("float64")
     if VOLUME_COL in raw.columns:

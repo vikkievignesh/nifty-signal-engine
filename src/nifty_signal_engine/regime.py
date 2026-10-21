@@ -21,6 +21,7 @@ when ``use_cpr_filter`` is on, ``cpr_top``/``cpr_bottom`` from the previous sess
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -48,8 +49,10 @@ class RegimeConfig:
     def __post_init__(self) -> None:
         if self.slope_lookback < 1:
             raise ValueError("slope_lookback must be >= 1")
-        if self.trend_slope_min_pct < 0 or self.range_spread_max_pct < 0:
-            raise ValueError("regime thresholds must be non-negative")
+        for name in ("trend_slope_min_pct", "range_spread_max_pct"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be a finite, non-negative number, got {value!r}")
 
 
 def classify_regime(features: pd.DataFrame, config: RegimeConfig = RegimeConfig()) -> pd.Series:

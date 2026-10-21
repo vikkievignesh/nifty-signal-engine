@@ -23,7 +23,7 @@ from datetime import timedelta
 
 import pandas as pd
 
-from ..schema import CANDLE_INTERVAL
+from ..schema import CANDLE_INTERVAL, SESSION_CLOSE
 from .interfaces import RuleSet
 from .models import TERMINAL_STATES, Alert, CandleContext, Setup, SetupState, StateTransition
 
@@ -43,7 +43,7 @@ class StateMachineConfig:
     max_bars_to_retest: int = 6
     max_bars_to_confirm: int = 3
     alert_ttl_bars: int = 3
-    expire_at_session_end: bool = True
+    expire_at_session_end: bool = True  # also caps alert expiry at the 15:30 close
 
     def __post_init__(self) -> None:
         for name in ("max_bars_to_retest", "max_bars_to_confirm", "alert_ttl_bars"):
@@ -153,6 +153,10 @@ class SignalStateMachine:
         logger.debug("%s %s: %s -> %s (%s)", ctx.timestamp, setup.setup_id, frm, to, reason)
 
     def _make_alert(self, setup: Setup, ctx: CandleContext, reason: str) -> Alert:
+        expires_at = ctx.available_at + self.config.alert_ttl_bars * self.interval
+        if self.config.expire_at_session_end:
+            session_close = ctx.session_date + pd.Timedelta(hours=SESSION_CLOSE.hour, minutes=SESSION_CLOSE.minute)
+            expires_at = max(ctx.available_at, min(expires_at, session_close))
         alert = Alert(
             alert_id=f"{setup.setup_id}-alert",
             setup_id=setup.setup_id,
@@ -161,7 +165,7 @@ class SignalStateMachine:
             level_name=setup.level_name,
             candle_timestamp=ctx.timestamp,
             available_at=ctx.available_at,
-            expires_at=ctx.available_at + self.config.alert_ttl_bars * self.interval,
+            expires_at=expires_at,
             regime=ctx.regime,
             reason=reason,
         )

@@ -15,7 +15,7 @@ from pathlib import Path
 from .config import Settings
 from .data_loader import load_candles_csv
 from .logging_config import configure_logging
-from .pipeline import build_example_machine, build_feature_frame
+from .pipeline import FEATURE_COLUMNS, build_example_machine, build_feature_frame
 from .signals.runner import run_signals
 
 logger = logging.getLogger("nifty_signal_engine")
@@ -30,7 +30,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(settings.log_level)
     candles = load_candles_csv(args.csv)
     frame = build_feature_frame(candles, settings)
-    result = run_signals(frame, build_example_machine(settings))
+    result = run_signals(frame, build_example_machine(settings), FEATURE_COLUMNS)
 
     print("RESEARCH OUTPUT — example rules are UNVALIDATED; not trading advice.")
     print(f"candles: {len(frame)}  sessions: {frame['timestamp'].dt.normalize().nunique()}")

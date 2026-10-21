@@ -6,6 +6,7 @@ from the environment or a secret manager, never from source files.
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from .features.volume import RelativeVolumeMode
 from .regime import RegimeConfig
-from .schema import EXPECTED_CANDLES_PER_SESSION, VolumeSource
+from .schema import EXPECTED_CANDLES_PER_SESSION, TRADED_VOLUME_SOURCES, VolumeSource
 from .signals.state_machine import StateMachineConfig
 
 PREFIX = "NIFTY_"
@@ -34,6 +35,16 @@ class RuleParams:
     retest_tolerance_pct: float = 0.03
     invalidation_buffer_pct: float = 0.05
     confirmation_min_rvol: float | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("breakout_buffer_pct", "retest_tolerance_pct", "invalidation_buffer_pct"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ConfigError(f"{name} must be a finite, non-negative number, got {value!r}")
+        if self.confirmation_min_rvol is not None and (
+            not math.isfinite(self.confirmation_min_rvol) or self.confirmation_min_rvol <= 0
+        ):
+            raise ConfigError("confirmation_min_rvol must be a finite, positive number")
 
 
 @dataclass(frozen=True)
@@ -59,6 +70,11 @@ class Settings:
                 raise ConfigError(f"{name} must be >= 1")
         if self.ema_fast >= self.ema_slow:
             raise ConfigError("ema_fast must be shorter than ema_slow")
+        if self.rules.confirmation_min_rvol is not None and self.volume_source not in TRADED_VOLUME_SOURCES:
+            raise ConfigError(
+                "RULE_CONFIRMATION_MIN_RVOL requires a traded-volume VOLUME_SOURCE "
+                f"({sorted(s.value for s in TRADED_VOLUME_SOURCES)}); RVOL would be NaN and nothing could confirm"
+            )
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -125,9 +141,12 @@ class _Reader:
     def optional_float(self, key: str) -> float | None:
         raw = self._raw(key)
         try:
-            return None if raw is None else float(raw)
+            value = None if raw is None else float(raw)
         except ValueError:
             raise ConfigError(f"{PREFIX}{key} must be a number, got {raw!r}") from None
+        if value is not None and not math.isfinite(value):
+            raise ConfigError(f"{PREFIX}{key} must be finite, got {raw!r}")
+        return value
 
     def bool(self, key: str, default: bool) -> bool:
         raw = self._raw(key)

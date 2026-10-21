@@ -13,15 +13,26 @@ from .regime import classify_regime
 from .schema import CLOSE_COL, TRADED_VOLUME_SOURCES, VOLUME_COL
 from .signals.example_rules import example_ruleset
 from .signals.state_machine import SignalStateMachine
+from .validation import validate_candles
 
 logger = logging.getLogger(__name__)
+
+# Columns handed to signal rules. An explicit allow-list so an extra column added to
+# the frame (e.g. a forward return during research) can never leak into a rule.
+FEATURE_COLUMNS = (
+    "cpr_pivot", "cpr_bc", "cpr_tc", "cpr_top", "cpr_bottom", "cpr_width_pct",
+    "ema_fast", "ema_slow", "sma", "volume_baseline", "rvol",
+)
 
 
 def build_feature_frame(candles: pd.DataFrame, settings: Settings) -> pd.DataFrame:
     """Candles plus CPR, EMA/SMA, RVOL and regime. Each row uses only data up to its close.
 
     RVOL columns are NaN when the configured volume source is not traded volume.
+    Raises ``CandleValidationError`` on malformed or unordered candles, since every
+    feature here assumes ascending, de-duplicated, IST-stamped data.
     """
+    validate_candles(candles).raise_if_errors()
     frame = candles.copy()
     frame = frame.join(compute_cpr(candles, min_session_candles=settings.cpr_min_session_candles))
     close = candles[CLOSE_COL]

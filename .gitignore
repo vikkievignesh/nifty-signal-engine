@@ -7,6 +7,8 @@ __pycache__/
 venv/
 build/
 dist/
+.coverage
+htmlcov/
 
 # Secrets and local configuration — never commit
 .env
