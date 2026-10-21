@@ -172,6 +172,15 @@ def _source_lookup(env: Mapping[str, str] | None, dotenv_path: str | Path) -> Ca
     return lookup
 
 
+def lookup_setting(
+    name: str,
+    env: Mapping[str, str] | None = None,
+    dotenv_path: str | Path = ".env",
+) -> str | None:
+    """Value of one non-secret ``FYERS_*`` setting (environment first, then ``.env``), or None."""
+    return _source_lookup(env, dotenv_path)(name)
+
+
 def _require(names_values: tuple[tuple[str, str | None], ...]) -> None:
     missing = [name for name, value in names_values if not value]
     if missing:

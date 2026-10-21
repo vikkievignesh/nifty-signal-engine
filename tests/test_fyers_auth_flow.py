@@ -29,7 +29,9 @@ from nifty_signal_engine.fyers.auth import (
     REDIRECT_URI,
     build_login_url,
     evaluate_callback,
+    redirect_uri_for,
     urllib_post_transport,
+    validate_callback_port,
 )
 
 from fyers_auth_helpers import (
@@ -440,3 +442,84 @@ def test_post_transport_does_not_follow_redirects(redirecting_server):
     response = urllib_post_transport(f"http://127.0.0.1:{port}/start", {"Content-Type": "application/json"}, b"{}", 5)
     assert response.status == 302
     assert [h[1] for h in hits] == ["/start"]
+
+
+# --- explicit callback port and redirect URI matching ------------------------------------------
+
+@pytest.mark.parametrize("value, expected", [(1024, 1024), (5000, 5000), (5001, 5001), (65535, 65535),
+                                             ("5001", 5001), (" 5001 ", 5001)])
+def test_valid_callback_ports(value, expected):
+    assert validate_callback_port(value) == expected
+
+
+@pytest.mark.parametrize("value", [0, 1, 80, 1023, 65536, 99999, -1, "abc", "", "5000.5", "5 000", None, True, 5000.5])
+def test_invalid_callback_ports_are_refused(value):
+    with pytest.raises(AuthFlowError, match="callback port"):
+        validate_callback_port(value)
+
+
+def test_redirect_uri_format_and_default():
+    assert redirect_uri_for(5001) == "http://127.0.0.1:5001/callback"
+    assert redirect_uri_for(5000) == REDIRECT_URI == "http://127.0.0.1:5000/callback"
+
+
+def test_login_url_uses_the_given_redirect_uri_and_defaults_to_the_registered_one():
+    custom = redirect_uri_for(5001)
+    parsed = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(build_login_url(APP_ID, STATE, redirect_uri=custom)).query))
+    assert parsed["redirect_uri"] == custom and parsed["state"] == STATE
+    default = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(build_login_url(APP_ID, STATE)).query))
+    assert default["redirect_uri"] == "http://127.0.0.1:5000/callback"
+
+
+@pytest.mark.parametrize("port", [5000, 5001, 8765, 65535])
+def test_custom_port_binds_only_127_0_0_1_on_exactly_that_port(monkeypatch, port):
+    bound = []
+    recorder = _RecordingServer(bound)
+    monkeypatch.setattr(auth, "_HTTPServer", recorder)
+    with CallbackServer(port=port) as server:
+        assert server.port == port and server.redirect_uri == f"http://127.0.0.1:{port}/callback"
+        assert build_login_url(APP_ID, STATE, redirect_uri=server.redirect_uri).count(f"%3A{port}%2Fcallback") == 1
+    assert [address for address, _ in bound] == [("127.0.0.1", port)]  # one bind, loopback only
+
+
+def test_redirect_uri_comes_from_the_port_really_bound():
+    with CallbackServer(port=0) as server:  # OS picks the port; the URI must still name it exactly
+        assert server.port not in (0, 5000) or server.port == 5000
+        assert server.redirect_uri == f"http://127.0.0.1:{server.port}/callback"
+
+
+def test_bind_failure_on_custom_port_has_no_fallback_and_explains_the_dashboard(monkeypatch):
+    import errno
+
+    attempts = []
+
+    def busy(address, handler):
+        attempts.append(address)
+        raise OSError(errno.EADDRINUSE, "Address already in use")
+
+    monkeypatch.setattr(auth, "_HTTPServer", busy)
+    with pytest.raises(AuthFlowError, match=r"cannot listen on 127\.0\.0\.1:5001") as info:
+        CallbackServer(port=5001)
+    message = str(info.value)
+    assert attempts == [("127.0.0.1", 5001)]
+    assert "FYERS_CALLBACK_PORT" in message and "--port" in message and "FYERS dashboard" in message
+    assert "Address already in use" not in message
+
+
+def test_real_busy_port_is_refused_not_shared_and_not_replaced():
+    import socket
+
+    blocker = socket.socket()
+    try:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        taken = blocker.getsockname()[1]
+        with pytest.raises(AuthFlowError, match=f"127.0.0.1:{taken}"):
+            CallbackServer(port=taken)
+    finally:
+        blocker.close()
+
+
+def test_state_is_still_strictly_validated_on_a_non_default_port():
+    outcome, responses = serve_and_request([("GET", callback_target("FORGED"), None)])
+    assert isinstance(outcome, AuthFlowError) and "does not match" in str(outcome) and responses[0][0] == 400

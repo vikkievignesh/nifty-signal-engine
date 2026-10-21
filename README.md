@@ -87,8 +87,9 @@ development so far; the tests use mocked responses only.
 
 1. In the FYERS API dashboard, create an app and note its *App ID*. Enable the
    market-data permission (historical data) for it.
-2. Register `http://127.0.0.1:5000/callback` as the app's redirect URL, exactly as
-   written (see *Logging in* below), and note the app's *App Secret*.
+2. Save `http://127.0.0.1:5000/callback` as the app's redirect URL, exactly as written
+   (use another port only as described under *If port 5000 is busy* below), and note the
+   app's *App Secret*.
 3. Put your credentials in a local, git-ignored `.env` file in the repository root
    (or export them in your shell), then `chmod 600 .env`:
 
@@ -110,7 +111,8 @@ python -m nifty_signal_engine.fyers.login            # add --print-url if no bro
 ```
 
 It follows the FYERS v3 Individual App flow: it opens the FYERS login page, listens
-only on `http://127.0.0.1:5000/callback` (loopback, fixed port, no fallback), checks
+only on `http://127.0.0.1:<port>/callback` (loopback only; port 5000 unless you set one
+explicitly; never a fallback), checks
 the returned OAuth `state` against a fresh 256-bit random value, exchanges the
 `auth_code` at `/validate-authcode` using `appIdHash = SHA256("app_id:app_secret")`,
 and updates **only** `FYERS_ACCESS_TOKEN` in `.env` (all other lines are preserved;
@@ -118,12 +120,36 @@ file mode forced to `0600`; symlinks, non-regular files, foreign-owned or hard-l
 files and files git does not ignore are refused; the write is atomic). You complete the
 FYERS login and 2FA in the browser yourself. The app secret, `appIdHash`, auth code and
 access token are never printed or logged, and the login URL is hidden unless you pass
-`--print-url`. Options: `--env-file`, `--timeout` (seconds, max 600), `--print-url`,
+`--print-url`. Options: `--env-file`, `--port`, `--timeout` (seconds, max 600), `--print-url`,
 `--no-browser`. Access tokens expire (daily, per FYERS); run it again when the
 downloader reports an authentication failure. It places no orders and runs no trading
 logic.
 
-*Security limitations:* anything running as your user can reach `127.0.0.1:5000` while
+**If port 5000 is busy (common on macOS).** macOS often reserves port 5000 for its
+AirPlay Receiver (it appears as *Control Center*), and the helper then refuses to start
+with a "cannot listen on 127.0.0.1:5000" error. It never kills or changes another
+process and never silently switches port. Either free the port yourself (for example by
+turning AirPlay Receiver off in System Settings) or choose another port explicitly:
+
+1. In the FYERS API dashboard, change the app's redirect URL to exactly
+   `http://127.0.0.1:<port>/callback` (for port 5001: `http://127.0.0.1:5001/callback`)
+   and **save it**. FYERS only accepts the redirect URL saved on the app, so this must be
+   done before you log in.
+2. Run the helper with the same port, either way:
+
+   ```bash
+   python -m nifty_signal_engine.fyers.login --port 5001
+   # or: export FYERS_CALLBACK_PORT=5001   (the environment wins over .env; --port wins over both)
+   ```
+
+The port must be an integer from 1024 to 65535 (`0`, i.e. "any free port", is refused
+because it could never match a saved URL). The `redirect_uri` sent to FYERS is always built
+from the port the helper actually bound, and the helper prints the exact URL to save; a
+custom port also prints a reminder. Nothing else changes: the host stays `127.0.0.1`, and
+the OAuth `state` check and all other protections apply on every port. Going back to the
+default needs the dashboard redirect URL set to `http://127.0.0.1:5000/callback` again.
+
+*Security limitations:* anything running as your user can reach `127.0.0.1:<port>` while
 the helper waits and could race the real redirect (a wrong `state` aborts the login,
 and the page shown echoes nothing); the one-shot callback is plain HTTP on loopback
 because that is what the redirect URL uses; a token in `.env` is as safe as your user
@@ -134,8 +160,8 @@ Windows the file mode is not enforced); and checking that `.env` is git-ignored 
 
 *Not verified against the live FYERS service* (the official documentation pages could
 not be opened from the development environment and no live login was performed): the
-exact redirect query format and whether FYERS accepts `http://127.0.0.1:5000/callback`
-as a redirect URL. The helper is deliberately strict: it accepts a callback only with a
+exact redirect query format and whether FYERS accepts a `http://127.0.0.1:<port>/callback`
+redirect URL. The helper is deliberately strict: it accepts a callback only with a
 matching `state`, exactly one well-formed `auth_code` and no `error`/`error_description`
 parameter, and rejects anything else with a generic message. If your first attempt is
 rejected, check the redirect URL registered on the app and report what FYERS actually

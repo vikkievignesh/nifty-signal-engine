@@ -4,9 +4,11 @@ Flow (endpoints and fields per the official ``fyers-apiv3`` SDK 3.2.0 and a summ
 the official FYERS v3 "individual app" authentication docs):
 
 1. Open ``GET https://api-t1.fyers.in/api/v3/generate-authcode`` with ``client_id``,
-   ``redirect_uri``, ``response_type=code`` and a random ``state``.
+   ``redirect_uri``, ``response_type=code`` and a random ``state``. ``redirect_uri`` is
+   always the URI of the server that is really listening and must equal the redirect URI
+   saved on the FYERS app.
 2. After login FYERS redirects the browser to the registered redirect URL. This module
-   serves exactly ``http://127.0.0.1:5000/callback`` and reads ``auth_code`` and ``state``
+   serves ``http://127.0.0.1:<port>/callback`` (default port 5000) and reads ``auth_code`` and ``state``
    from the query string.
 3. ``POST https://api-t1.fyers.in/api/v3/validate-authcode`` with JSON
    ``{"grant_type": "authorization_code", "appIdHash": SHA256("app_id:app_secret"),
@@ -55,9 +57,35 @@ GRANT_TYPE = "authorization_code"
 RESPONSE_TYPE = "code"
 
 CALLBACK_HOST = "127.0.0.1"
-CALLBACK_PORT = 5000
+CALLBACK_PORT = 5000  # default; must match the redirect URI registered on the FYERS app
 CALLBACK_PATH = "/callback"
-REDIRECT_URI = f"http://{CALLBACK_HOST}:{CALLBACK_PORT}{CALLBACK_PATH}"
+MIN_CALLBACK_PORT, MAX_CALLBACK_PORT = 1024, 65535
+CALLBACK_PORT_VAR = "FYERS_CALLBACK_PORT"
+
+
+def redirect_uri_for(port: int) -> str:
+    """The exact redirect URI for ``port``: ``http://127.0.0.1:<port>/callback``."""
+    return f"http://{CALLBACK_HOST}:{port}{CALLBACK_PATH}"
+
+
+REDIRECT_URI = redirect_uri_for(CALLBACK_PORT)  # the default registered redirect URI
+
+
+def validate_callback_port(value: object) -> int:
+    """Return ``value`` as a usable explicit callback port (1024-65535) or raise.
+
+    Port 0 (OS-assigned) is refused: an unpredictable port could never match the
+    redirect URI registered in the FYERS dashboard.
+    """
+    if isinstance(value, bool):
+        raise AuthFlowError("callback port must be an integer")
+    try:
+        port = int(str(value).strip())
+    except ValueError:
+        raise AuthFlowError("callback port must be an integer") from None
+    if not MIN_CALLBACK_PORT <= port <= MAX_CALLBACK_PORT:
+        raise AuthFlowError(f"callback port must be between {MIN_CALLBACK_PORT} and {MAX_CALLBACK_PORT}")
+    return port
 
 DEFAULT_TIMEOUT_SECONDS = 180.0
 MAX_TIMEOUT_SECONDS = 600.0
@@ -78,11 +106,16 @@ def generate_state() -> str:
     return secrets.token_urlsafe(32)
 
 
-def build_login_url(app_id: str, state: str, base_url: str = AUTH_BASE_URL) -> str:
-    """The FYERS login URL. Contains the app id and one-time state, never the app secret."""
+def build_login_url(app_id: str, state: str, base_url: str = AUTH_BASE_URL,
+                    redirect_uri: str = REDIRECT_URI) -> str:
+    """The FYERS login URL. Contains the app id and one-time state, never the app secret.
+
+    ``redirect_uri`` must be the URI of the server that is actually listening
+    (``CallbackServer.redirect_uri``) and the one registered on the FYERS app.
+    """
     query = urllib.parse.urlencode({
         "client_id": app_id,
-        "redirect_uri": REDIRECT_URI,
+        "redirect_uri": redirect_uri,
         "response_type": RESPONSE_TYPE,
         "state": state,
     })
@@ -210,11 +243,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
 
 class CallbackServer:
-    """One-shot HTTP server bound to ``127.0.0.1:5000`` serving only ``/callback``.
+    """One-shot HTTP server bound to ``127.0.0.1:<port>`` serving only ``/callback``.
 
-    The host and path are fixed. ``port`` exists only so tests can use an ephemeral
-    port; production code never passes it. Binding failure (port busy) raises
-    :class:`AuthFlowError`; there is deliberately no fallback port.
+    The host and path are fixed. ``port`` defaults to 5000 (the registered redirect URI)
+    and can be set explicitly; production callers validate it with
+    :func:`validate_callback_port`, tests may pass ``0`` for an ephemeral port. There is
+    exactly one bind attempt: a busy port raises :class:`AuthFlowError` and there is
+    deliberately no fallback port.
     """
 
     host = CALLBACK_HOST
@@ -225,13 +260,19 @@ class CallbackServer:
             self._httpd = _HTTPServer((CALLBACK_HOST, port), _Handler)
         except OSError as exc:
             raise AuthFlowError(
-                f"cannot listen on {CALLBACK_HOST}:{port} ({type(exc).__name__}); "
-                "is another program using that port?"
+                f"cannot listen on {CALLBACK_HOST}:{port} ({type(exc).__name__}); another program is "
+                f"probably using that port. Free it, or choose another with --port / {CALLBACK_PORT_VAR} "
+                "after updating AND saving the matching redirect URI in the FYERS dashboard"
             ) from None
         self.port: int = self._httpd.server_address[1]
         if self._httpd.server_address[0] != CALLBACK_HOST:  # defence in depth
             self._httpd.server_close()
             raise AuthFlowError("callback server is not bound to 127.0.0.1")
+
+    @property
+    def redirect_uri(self) -> str:
+        """Redirect URI for the port this server is really bound to."""
+        return redirect_uri_for(self.port)
 
     def __enter__(self) -> CallbackServer:
         return self

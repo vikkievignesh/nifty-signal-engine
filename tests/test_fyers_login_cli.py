@@ -40,7 +40,8 @@ class Harness:
         self.opened_urls = []
         self.server_created = False
 
-    def server_factory(self):
+    def server_factory(self, port):
+        self.requested_port = port  # the real port is ephemeral here; the login URL must follow the bound server
         self.server_created = True
         self.server = CallbackServer(port=0)
         return self.server
@@ -165,7 +166,7 @@ def test_symlinked_env_fails_before_any_server_or_browser(tmp_path, capsys):
 
 
 def test_port_in_use_is_reported(tmp_path, capsys):
-    def busy():
+    def busy(port):
         raise AuthFlowError("cannot listen on 127.0.0.1:5000 (OSError); is another program using that port?")
 
     env_file = tmp_path / ".env"
@@ -206,7 +207,7 @@ def test_no_browser_requires_print_url(tmp_path, capsys):
 
 
 def test_ctrl_c_is_a_clean_cancel(tmp_path, capsys):
-    def interrupted():
+    def interrupted(port):
         raise KeyboardInterrupt
 
     env_file = tmp_path / ".env"
@@ -223,3 +224,108 @@ def test_downloader_credential_loading_is_unaffected_by_the_secret(tmp_path):
     env_file.chmod(0o600)
     creds = load_credentials({}, env_file)
     assert APP_SECRET not in repr(creds) and creds.app_id == APP_ID
+
+
+# --- explicit callback port ---------------------------------------------------------------------
+
+class StubServer:
+    """Looks like CallbackServer but never binds; stops the flow right after the login URL is built."""
+
+    def __init__(self, port):
+        self.port = port
+        self.redirect_uri = f"http://127.0.0.1:{port}/callback"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def wait_for_auth_code(self, state, timeout):
+        raise AuthFlowError("stub: stop after the login URL")
+
+
+def run_with_stub(tmp_path, *argv, env=None, env_text=ENV_TEXT):
+    requested, urls = [], []
+
+    def factory(port):
+        requested.append(port)
+        return StubServer(port)
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(env_text)
+    env_file.chmod(0o600)
+    code = main(["--env-file", str(env_file), *argv], env={} if env is None else env,
+                open_url=lambda url: urls.append(url) or True,
+                post_transport=ScriptedPost(token_resp()), server_factory=factory)
+    return code, requested, urls
+
+
+def redirect_param(url):
+    return urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["redirect_uri"][0]
+
+
+def test_default_port_is_5000_and_login_url_uses_the_registered_redirect_uri(tmp_path, capsys):
+    code, requested, urls = run_with_stub(tmp_path)
+    out = capsys.readouterr().out
+    assert code == 1 and requested == [5000]  # the stub stops the flow; we only inspect what was set up
+    assert redirect_param(urls[0]) == "http://127.0.0.1:5000/callback"
+    assert "NOTE: custom port" not in out
+
+
+@pytest.mark.parametrize("argv, env, env_text, expected", [
+    (["--port", "5001"], {}, ENV_TEXT, 5001),
+    ([], {"FYERS_CALLBACK_PORT": "5002"}, ENV_TEXT, 5002),
+    ([], {}, ENV_TEXT + "FYERS_CALLBACK_PORT=5003\n", 5003),
+    (["--port", "5004"], {"FYERS_CALLBACK_PORT": "5002"}, ENV_TEXT, 5004),   # CLI beats the environment
+    ([], {"FYERS_CALLBACK_PORT": "5002"}, ENV_TEXT + "FYERS_CALLBACK_PORT=5003\n", 5002),  # env beats .env
+])
+def test_custom_port_is_passed_to_the_server_and_matches_the_login_url(tmp_path, capsys, argv, env, env_text, expected):
+    code, requested, urls = run_with_stub(tmp_path, *argv, env=env, env_text=env_text)
+    out = capsys.readouterr().out
+    exact = f"http://127.0.0.1:{expected}/callback"
+    assert requested == [expected]                       # exactly one server, on exactly the configured port
+    assert redirect_param(urls[0]) == exact              # login URL == listening URI == what must be registered
+    assert f"Listening on {exact}" in out
+    assert f"NOTE: custom port {expected}" in out and "FYERS dashboard" in out and "save it" in out
+    assert APP_SECRET not in out
+
+
+@pytest.mark.parametrize("value", ["0", "80", "1023", "65536", "-5", "abc", "50 01", "5000.5"])
+def test_invalid_ports_are_rejected_before_any_server_or_browser(tmp_path, capsys, value):
+    code, requested, urls = run_with_stub(tmp_path, "--port", value)
+    err = capsys.readouterr().err
+    assert code == 1 and "callback port" in err  # same message whether it came from --port or the environment
+    assert requested == [] and urls == []
+
+
+def test_invalid_port_from_environment_is_rejected(tmp_path, capsys):
+    code, requested, _ = run_with_stub(tmp_path, env={"FYERS_CALLBACK_PORT": "not-a-port"})
+    assert code == 1 and "callback port must be an integer" in capsys.readouterr().err and requested == []
+
+
+def test_login_url_follows_the_port_the_server_really_bound(tmp_path):
+    """Integration: real CallbackServer on an ephemeral port; the URL must name that exact port."""
+    harness = Harness("ok")
+    code, _ = run(tmp_path, harness, ScriptedPost(token_resp()), "--port", "5001")
+    assert code == 0
+    assert redirect_param(harness.opened_urls[0]) == f"http://127.0.0.1:{harness.server.port}/callback"
+    assert harness.requested_port == 5001
+
+
+def test_busy_custom_port_fails_once_without_fallback_and_leaves_env_untouched(tmp_path, capsys):
+    calls = []
+
+    def busy(port):
+        calls.append(port)
+        raise AuthFlowError(f"cannot listen on 127.0.0.1:{port} (OSError); another program is probably using "
+                            "that port.")
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(ENV_TEXT)
+    opened = []
+    code = main(["--env-file", str(env_file), "--port", "5001"], env={}, open_url=opened.append,
+                post_transport=ScriptedPost(token_resp()), server_factory=busy)
+    assert code == 1 and calls == [5001]  # one attempt on the requested port only
+    assert "127.0.0.1:5001" in capsys.readouterr().err
+    assert opened == [] and env_file.read_text() == ENV_TEXT

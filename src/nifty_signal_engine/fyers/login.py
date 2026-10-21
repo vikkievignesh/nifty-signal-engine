@@ -19,17 +19,21 @@ from pathlib import Path
 from . import envfile
 from .auth import (
     CALLBACK_PATH,
+    CALLBACK_PORT,
+    CALLBACK_PORT_VAR,
     DEFAULT_TIMEOUT_SECONDS,
+    MAX_CALLBACK_PORT,
     MAX_TIMEOUT_SECONDS,
-    REDIRECT_URI,
+    MIN_CALLBACK_PORT,
     CallbackServer,
     PostTransport,
     build_login_url,
     exchange_auth_code,
     generate_state,
     urllib_post_transport,
+    validate_callback_port,
 )
-from .credentials import ACCESS_TOKEN_VAR, AuthCredentials, load_auth_credentials
+from .credentials import ACCESS_TOKEN_VAR, AuthCredentials, load_auth_credentials, lookup_setting
 from .errors import AuthFlowError, FyersError
 
 logger = logging.getLogger("nifty_signal_engine.fyers")
@@ -39,21 +43,27 @@ def run_login(
     credentials: AuthCredentials,
     *,
     env_file: str | Path = ".env",
+    port: int = CALLBACK_PORT,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     open_url: Callable[[str], bool] = webbrowser.open,
     no_browser: bool = False,
     print_url: bool = False,
     post_transport: PostTransport = urllib_post_transport,
-    server_factory: Callable[[], CallbackServer] = CallbackServer,
+    server_factory: Callable[[int], CallbackServer] = lambda port: CallbackServer(port=port),
     say: Callable[[str], None] = print,
 ) -> None:
     """Run one login attempt; on success ``FYERS_ACCESS_TOKEN`` is updated in ``env_file``."""
+    port = validate_callback_port(port)
     envfile.preflight(env_file)  # fail before the user logs in, not after
     state = generate_state()
-    with server_factory() as server:
-        url = build_login_url(credentials.app_id, state)
-        say(f"Listening on {REDIRECT_URI}. That exact URL must be registered as the redirect URL "
-            "of your FYERS app.")
+    with server_factory(port) as server:  # exactly one bind attempt; no fallback port
+        redirect_uri = server.redirect_uri  # from the port actually bound, so it cannot drift
+        url = build_login_url(credentials.app_id, state, redirect_uri=redirect_uri)
+        say(f"Listening on {redirect_uri}. That exact URL must be saved as the redirect URL of your "
+            "FYERS app.")
+        if port != CALLBACK_PORT:
+            say(f"NOTE: custom port {port}. Before continuing, update the redirect URL in the FYERS "
+                f"dashboard to exactly {redirect_uri} and save it; otherwise FYERS will reject the login.")
         if print_url:
             say("Open this login URL in your browser (it contains your app id and a one-time state):")
             say(url)
@@ -82,12 +92,16 @@ def main(
     env: Mapping[str, str] | None = None,
     open_url: Callable[[str], bool] = webbrowser.open,
     post_transport: PostTransport = urllib_post_transport,
-    server_factory: Callable[[], CallbackServer] = CallbackServer,
+    server_factory: Callable[[int], CallbackServer] = lambda port: CallbackServer(port=port),
 ) -> int:
     parser = argparse.ArgumentParser(prog="python -m nifty_signal_engine.fyers.login", description=__doc__)
     parser.add_argument("--env-file", type=Path, default=Path(".env"),
                         help="local, git-ignored file holding FYERS_APP_ID/FYERS_APP_SECRET; "
                              "FYERS_ACCESS_TOKEN is written here (default .env)")
+    parser.add_argument("--port", type=str, default=None,  # validated by validate_callback_port, like the env var
+                        help=f"callback port on 127.0.0.1 ({MIN_CALLBACK_PORT}-{MAX_CALLBACK_PORT}); default "
+                             f"{CALLBACK_PORT} or ${CALLBACK_PORT_VAR}. It must match the redirect URI saved in "
+                             "the FYERS dashboard (http://127.0.0.1:<port>/callback)")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS,
                         help=f"seconds to wait for the browser callback (max {MAX_TIMEOUT_SECONDS:.0f})")
     parser.add_argument("--print-url", action="store_true",
@@ -99,7 +113,9 @@ def main(
     try:
         envfile.preflight(args.env_file)
         credentials = load_auth_credentials(env, args.env_file)
-        run_login(credentials, env_file=args.env_file, timeout=args.timeout, open_url=open_url,
+        configured = args.port if args.port is not None else lookup_setting(CALLBACK_PORT_VAR, env, args.env_file)
+        port = validate_callback_port(configured) if configured is not None else CALLBACK_PORT
+        run_login(credentials, env_file=args.env_file, port=port, timeout=args.timeout, open_url=open_url,
                   no_browser=args.no_browser, print_url=args.print_url,
                   post_transport=post_transport, server_factory=server_factory)
     except KeyboardInterrupt:
