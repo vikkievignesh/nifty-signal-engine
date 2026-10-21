@@ -46,7 +46,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .client import _OPENER, HttpResponse
+from .client import _OPENER, HttpResponse, validate_user_agent
 from .credentials import REDACTED, AuthCredentials, SecretStr
 from .errors import AuthFlowError, FyersApiError, FyersAuthError
 from .netdiag import network_error_from
@@ -101,7 +101,6 @@ _MAX_DIAGNOSTIC_CHARS = 80
 _MAX_API_MESSAGE_CHARS = 120
 _API_MESSAGE_KEYS = ("message", "error_description", "error", "detail")  # the only body fields ever read
 _OPAQUE_RUN = re.compile(r"[A-Za-z0-9._~+/=-]{24,}")  # hashes, JWTs, long codes: never shown
-_USER_AGENT_RE = re.compile(r"[\x20-\x7e]{1,200}")  # printable ASCII only: no CR/LF, so no header injection
 _APP_ID_SHAPE = re.compile(r"[A-Za-z0-9]+-[0-9]+")  # FYERS dashboard format, e.g. "ABCDE12345-100"
 
 PostTransport = Callable[[str, Mapping[str, str], bytes, float], HttpResponse]
@@ -401,20 +400,6 @@ def summarise_response(response: HttpResponse, scrub: Callable[[str], str]) -> R
             message = _diagnostic(_OPAQUE_RUN.sub(REDACTED, scrub(value)), _MAX_API_MESSAGE_CHARS)
             break
     return ResponseSummary("json-object", media_type, len(raw), _as_int(payload.get("code")), message)
-
-
-def validate_user_agent(value: object) -> str:
-    """Return ``value`` (trimmed) if it is a safe header value, else raise.
-
-    EXPERIMENTAL / diagnostic only: an explicit ``User-Agent`` for the token-exchange request.
-    Printable ASCII, 1-200 characters; CR/LF and other control characters are refused.
-    """
-    if not isinstance(value, str):
-        raise AuthFlowError("user agent must be text")
-    text = value.strip()
-    if not _USER_AGENT_RE.fullmatch(text):
-        raise AuthFlowError("user agent must be 1-200 printable ASCII characters")
-    return text
 
 
 def describe_exchange_request(credentials: AuthCredentials, port: int, user_agent: str | None = None) -> list[str]:

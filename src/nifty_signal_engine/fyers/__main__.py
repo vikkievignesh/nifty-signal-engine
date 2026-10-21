@@ -18,7 +18,7 @@ from ..config import ConfigError, Settings
 from ..logging_config import configure_logging
 from ..schema import IST
 from ..validation import CandleValidationError
-from .client import FyersHistoryClient, Transport, urllib_transport
+from .client import FyersHistoryClient, Transport, urllib_transport, validate_user_agent
 from .credentials import load_credentials
 from .downloader import DEFAULT_WINDOW_DAYS, MAX_WINDOW_DAYS, NIFTY_SYMBOL, download_nifty_5m
 from .errors import FyersError
@@ -50,6 +50,9 @@ def main(
                         help=f"calendar days per request, 1..{MAX_WINDOW_DAYS} (default {DEFAULT_WINDOW_DAYS})")
     parser.add_argument("--min-interval", type=float, default=1.0, help="minimum seconds between requests")
     parser.add_argument("--no-raw", action="store_true", help="do not keep raw API responses")
+    parser.add_argument("--user-agent", type=str, default=None, metavar="VALUE",
+                        help="EXPERIMENTAL, diagnostic only: send this User-Agent with the history requests "
+                             "(printable ASCII, max 200 chars). Default: unchanged (urllib's own).")
     parser.add_argument("--allow-off-hours", action="store_true",
                         help="accept candles outside 09:15-15:25 (e.g. special sessions)")
     args = parser.parse_args(argv)
@@ -59,8 +62,12 @@ def main(
         configure_logging(settings.log_level)
         credentials = load_credentials(env, dotenv_path)
         client_kwargs = {"sleep": sleep} if sleep else {}
-        client = FyersHistoryClient(credentials, transport=transport,
-                                    min_interval_seconds=args.min_interval, **client_kwargs)
+        user_agent = validate_user_agent(args.user_agent) if args.user_agent is not None else None
+        client = FyersHistoryClient(credentials, transport=transport, min_interval_seconds=args.min_interval,
+                                    user_agent=user_agent, **client_kwargs)  # nothing is sent before this
+        if user_agent is not None:
+            print("NOTE: EXPERIMENTAL User-Agent override is active for the history requests (diagnostic only; "
+                  f"it is not a fix): {user_agent}")
         end = args.end or (now or datetime.now(IST)).astimezone(IST).date()
         result = download_nifty_5m(
             args.start, end, client=client,

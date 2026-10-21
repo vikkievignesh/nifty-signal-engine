@@ -25,6 +25,7 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -34,7 +35,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .credentials import Credentials
-from .errors import FyersApiError, FyersAuthError, FyersNetworkError, FyersRateLimitError
+from .errors import AuthFlowError, FyersApiError, FyersAuthError, FyersNetworkError, FyersRateLimitError
 from .netdiag import PERMANENT_CATEGORIES, network_error_from
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,23 @@ _MAX_MESSAGE_CHARS = 300
 _AUTH_CODES = frozenset({401, 403, -8, -15, -16, -17})
 _RATE_LIMIT_CODES = frozenset({429, -429})
 _AUTH_WORDS = ("token", "authenticat", "unauthor")
+
+
+_USER_AGENT_RE = re.compile(r"[\x20-\x7e]{1,200}")  # printable ASCII only: no CR/LF, so no header injection
+
+
+def validate_user_agent(value: object) -> str:
+    """Return ``value`` (trimmed) if it is a safe ``User-Agent`` header value, else raise.
+
+    EXPERIMENTAL / diagnostic only (shared by the token exchange and the history client).
+    Printable ASCII, 1-200 characters; CR/LF and other control characters are refused.
+    """
+    if not isinstance(value, str):
+        raise AuthFlowError("user agent must be text")
+    text = value.strip()
+    if not _USER_AGENT_RE.fullmatch(text):
+        raise AuthFlowError("user agent must be 1-200 printable ASCII characters")
+    return text
 
 
 @dataclass(frozen=True)
@@ -105,6 +123,7 @@ class FyersHistoryClient:
         max_retries: int = 4,
         backoff_seconds: float = 2.0,
         min_interval_seconds: float = 1.0,
+        user_agent: str | None = None,
     ) -> None:
         if not base_url.startswith("https://"):
             raise ValueError("base_url must be https:// so the access token is never sent in clear text")
@@ -119,6 +138,8 @@ class FyersHistoryClient:
         self._max_retries = max_retries
         self._backoff = backoff_seconds
         self._min_interval = min_interval_seconds
+        # EXPERIMENTAL opt-in; None (default) leaves the headers exactly as before and urllib adds its own.
+        self._user_agent = validate_user_agent(user_agent) if user_agent is not None else None
         self._last_request_at: float | None = None
 
     # -- public -------------------------------------------------------------------------
@@ -143,6 +164,8 @@ class FyersHistoryClient:
             "Content-Type": "application/json",
             "version": "3",
         }
+        if self._user_agent is not None:
+            headers["User-Agent"] = self._user_agent
         for attempt in range(self._max_retries + 1):
             self._pace()
             try:

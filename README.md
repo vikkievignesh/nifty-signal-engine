@@ -218,8 +218,17 @@ python -m nifty_signal_engine.fyers.login --check --port 5001 --user-agent "nift
 ```
 
 The value must be 1-200 printable ASCII characters (CR/LF and other control characters are refused
-before anything is sent). It applies only to the token exchange, never to the downloader, and is not
-stored anywhere: dropping the flag restores the default. The login prints a note whenever the
+before anything is sent). The same opt-in flag exists on the historical-data downloader, with the same
+validation, so a data request can be compared with and without it:
+
+```bash
+python -m nifty_signal_engine.fyers --start "$(date -v-7d +%F)" --user-agent "nifty-signal-engine-experiment/0.1"
+```
+
+On the downloader it is added to every history request (each window) and nothing else changes: the
+same URL, the same `Authorization`/`Content-Type`/`version` headers, the same pacing and retries. The value
+is never written to the CSV, metadata or raw files, and is not stored anywhere: dropping the flag
+restores the default. The login prints a note whenever the
 override is active. Compare the outcome of one attempt with and without the flag; a different
 result is evidence, an identical one rules this header out.
 
@@ -249,7 +258,8 @@ python -m nifty_signal_engine --csv data/local/fyers/NSE_NIFTY50-INDEX_5m_2024-0
 ```
 
 Options: `--out-dir`, `--window-days` (1-100, default 90), `--min-interval`
-(seconds between requests, default 1), `--no-raw`, `--allow-off-hours`.
+(seconds between requests, default 1), `--no-raw`, `--allow-off-hours`, and the experimental
+`--user-agent` (see *Experiment: explicit User-Agent* below).
 
 **Output** (default `data/local/fyers/`, git-ignored): the CSV
 (`timestamp,open,high,low,close,volume`, ISO-8601 with `+05:30`), a `.meta.json`
