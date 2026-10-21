@@ -186,15 +186,63 @@ def test_oversized_and_overlong_queries_are_rejected():
 
 # --- loopback server ---------------------------------------------------------------------------
 
-def test_default_server_binds_only_127_0_0_1_port_5000():
-    try:
-        server = CallbackServer()
-    except AuthFlowError:
-        pytest.skip("port 5000 is in use on this machine")
-    with server:
-        assert server._httpd.server_address == ("127.0.0.1", 5000)
-        with pytest.raises(AuthFlowError, match="cannot listen"):
-            CallbackServer()  # no fallback port, no port sharing
+class _RecordingServer:
+    """Stands in for the HTTP server so the production bind address can be checked without
+    opening a socket (port 5000 is often taken, e.g. by macOS Control Center / AirPlay Receiver)."""
+
+    def __init__(self, bound, host_reported=None):
+        self.bound = bound
+        self.host_reported = host_reported
+        self.closed = False
+
+    def __call__(self, address, handler):
+        self.bound.append((address, handler))
+        self.server_address = (self.host_reported or address[0], address[1])
+        return self
+
+    def server_close(self):
+        self.closed = True
+
+
+def test_default_server_binds_only_127_0_0_1_port_5000(monkeypatch):
+    bound = []
+    recorder = _RecordingServer(bound)
+    monkeypatch.setattr(auth, "_HTTPServer", recorder)
+    with CallbackServer() as server:  # production defaults: no arguments
+        assert server.port == 5000
+    assert [address for address, _ in bound] == [("127.0.0.1", 5000)]  # exactly one bind, loopback only
+    assert bound[0][1] is auth._Handler and recorder.closed
+
+
+def test_production_default_port_is_the_registered_redirect_port():
+    import inspect
+
+    assert inspect.signature(CallbackServer).parameters["port"].default == CALLBACK_PORT == 5000
+    assert REDIRECT_URI == f"http://127.0.0.1:{CALLBACK_PORT}{CALLBACK_PATH}"
+
+
+def test_busy_default_port_fails_with_no_fallback_port(monkeypatch):
+    import errno
+
+    attempts = []
+
+    def busy(address, handler):
+        attempts.append(address)
+        raise OSError(errno.EADDRINUSE, "Address already in use")
+
+    monkeypatch.setattr(auth, "_HTTPServer", busy)
+    with pytest.raises(AuthFlowError, match=r"cannot listen on 127\.0\.0\.1:5000") as info:
+        CallbackServer()
+    assert attempts == [("127.0.0.1", 5000)]  # one attempt; never retried on another port
+    assert "Address already in use" not in str(info.value)  # only the exception type is reported
+
+
+def test_server_not_actually_bound_to_loopback_is_refused_and_closed(monkeypatch):
+    recorder = _RecordingServer([], host_reported="0.0.0.0")
+    monkeypatch.setattr(auth, "_HTTPServer", recorder)
+    with pytest.raises(AuthFlowError, match="not bound to 127.0.0.1"):
+        CallbackServer()
+    assert recorder.closed
 
 
 def test_host_cannot_be_chosen_and_port_cannot_be_shared():
