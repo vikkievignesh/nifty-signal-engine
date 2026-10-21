@@ -181,6 +181,29 @@ reports Python's trust setup as yes/no facts only (no paths or values). Certific
 are not retried; other transient failures are retried by the downloader but never by the
 login, because an auth code can be used only once.
 
+**Troubleshooting `token exchange rejected (HTTP nnn)`.** A rejection now says what kind of
+response FYERS sent, without ever showing a raw body: the HTTP status, the response's `code` and
+`message` if it is a JSON API error (only those allowlisted fields are read, and they are scrubbed of
+your App ID, secret, hash and auth code in any case or URL-encoding, and of long opaque tokens), or
+just the shape and size for anything else (for example *an HTML page, not a JSON API error*, as a
+gateway or firewall block page would be). Bodies, other fields, headers and cookies are never shown.
+That distinction matters: a JSON API error with a code points at the application's own validation,
+while an HTML or code-less body points at something in front of it. The message does not name a
+cause; none is documented for a 403 on this endpoint (as far as the available sources show).
+
+Before another attempt, run the offline check (no server, no network, no secret printed):
+
+```bash
+python -m nifty_signal_engine.fyers.login --check --port 5001
+```
+
+It describes the exact request (`POST` to `/api/v3/validate-authcode`, JSON fields `grant_type`,
+`appIdHash`, `code`), explains that `appIdHash` is the SHA-256 of `<App ID>:<App Secret>` using the **full
+App ID exactly as the FYERS dashboard shows it, including its `-100`-style suffix** (dropping the suffix
+changes the hash), flags an App ID that does not look like `<ID>-<digits>` or that is wrapped in quote
+characters, and prints the redirect URI that will be sent, which must equal the saved dashboard value
+character for character. Auth codes are single-use and short-lived: always start a fresh login.
+
 *Security limitations:* anything running as your user can reach `127.0.0.1:<port>` while
 the helper waits and could race the real redirect (a wrong `state` aborts the login,
 and the page shown echoes nothing); the one-shot callback is plain HTTP on loopback

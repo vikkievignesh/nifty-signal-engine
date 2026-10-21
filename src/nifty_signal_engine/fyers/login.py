@@ -28,6 +28,7 @@ from .auth import (
     CallbackServer,
     PostTransport,
     build_login_url,
+    describe_exchange_request,
     exchange_auth_code,
     generate_state,
     urllib_post_transport,
@@ -107,6 +108,9 @@ def main(
     parser.add_argument("--print-url", action="store_true",
                         help="print the login URL (contains the app id and one-time state; never the secret)")
     parser.add_argument("--no-browser", action="store_true", help="do not try to open a browser")
+    parser.add_argument("--check", action="store_true",
+                        help="offline: describe the token-exchange request and sanity-check the App ID format "
+                             "and redirect URI; no server, no network, no secret printed")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -115,6 +119,9 @@ def main(
         credentials = load_auth_credentials(env, args.env_file)
         configured = args.port if args.port is not None else lookup_setting(CALLBACK_PORT_VAR, env, args.env_file)
         port = validate_callback_port(configured) if configured is not None else CALLBACK_PORT
+        if args.check:
+            print("\n".join(describe_exchange_request(credentials, port)))
+            return 0
         run_login(credentials, env_file=args.env_file, port=port, timeout=args.timeout, open_url=open_url,
                   no_browser=args.no_browser, print_url=args.print_url,
                   post_transport=post_transport, server_factory=server_factory)

@@ -366,3 +366,29 @@ def test_exchange_network_failures_are_classified_actionable_and_leak_nothing(tm
         assert phrase in out.err
     assert env_file.read_text() == ENV_TEXT  # nothing was saved
     assert_no_secrets(out.out, out.err, caplog.text)
+
+
+# --- HTTP 403 during the token exchange (safe diagnostics) ------------------------------------
+
+@pytest.mark.parametrize("response, expect, absent", [
+    (json_resp({"s": "error", "code": -5, "message": f"invalid app id hash {APP_ID_HASH}",
+                "debug": "internal-detail-0123456789abcdef"}, status=403),
+     ['API code -5', 'message "invalid app id hash ***"'], ["internal-detail", "debug"]),
+    (__import__("nifty_signal_engine.fyers", fromlist=["HttpResponse"]).HttpResponse(
+        403, {"Content-Type": "text/html"}, b"<html><title>Attention Required</title>cf-ray 8a1b</html>"),
+     ["an HTML page, not a JSON API error", "text/html"], ["Attention", "cf-ray"]),
+])
+def test_http_403_during_login_is_explained_safely_and_nothing_is_saved(tmp_path, capsys, caplog, response,
+                                                                         expect, absent):
+    transport = ScriptedPost(response)
+    with caplog.at_level(logging.DEBUG):
+        code, env_file = run(tmp_path, Harness("ok"), transport)
+    out = capsys.readouterr()
+    assert code == 1 and len(transport.calls) == 1
+    assert "token exchange rejected (HTTP 403)" in out.err
+    for phrase in expect:
+        assert phrase in out.err
+    for fragment in absent:
+        assert fragment not in out.err
+    assert env_file.read_text() == ENV_TEXT
+    assert_no_secrets(out.out, out.err, caplog.text)

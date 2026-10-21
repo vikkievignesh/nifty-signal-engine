@@ -43,6 +43,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from .client import _OPENER, HttpResponse
@@ -97,6 +98,10 @@ _AUTH_CODE_RE = re.compile(r"[A-Za-z0-9._~+/=-]{8,4096}")
 _ACCESS_TOKEN_RE = re.compile(r"[A-Za-z0-9._~+/=-]{16,4096}")
 _ERROR_KEYS = ("error", "error_description", "message", "s", "code")
 _MAX_DIAGNOSTIC_CHARS = 80
+_MAX_API_MESSAGE_CHARS = 120
+_API_MESSAGE_KEYS = ("message", "error_description", "error", "detail")  # the only body fields ever read
+_OPAQUE_RUN = re.compile(r"[A-Za-z0-9._~+/=-]{24,}")  # hashes, JWTs, long codes: never shown
+_APP_ID_SHAPE = re.compile(r"[A-Za-z0-9]+-[0-9]+")  # FYERS dashboard format, e.g. "ABCDE12345-100"
 
 PostTransport = Callable[[str, Mapping[str, str], bytes, float], HttpResponse]
 
@@ -126,10 +131,10 @@ def build_login_url(app_id: str, state: str, base_url: str = AUTH_BASE_URL,
 
 # --- callback validation (pure, unit-testable) -----------------------------------------------
 
-def _diagnostic(value: str) -> str:
-    """Printable-ASCII, short, whitespace-collapsed rendering of untrusted callback text."""
-    cleaned = re.sub(r"[^A-Za-z0-9 ._:,-]", "", value)
-    return re.sub(r"\s+", " ", cleaned).strip()[:_MAX_DIAGNOSTIC_CHARS]
+def _diagnostic(value: str, limit: int = _MAX_DIAGNOSTIC_CHARS) -> str:
+    """Printable-ASCII, short, whitespace-collapsed rendering of untrusted text."""
+    cleaned = re.sub(r"[^A-Za-z0-9 ._:,*-]", "", value)
+    return re.sub(r"\s+", " ", cleaned).strip()[:limit]
 
 
 def evaluate_callback(raw_query: str, expected_state: str) -> SecretStr:
@@ -318,6 +323,108 @@ def urllib_post_transport(url: str, headers: Mapping[str, str], body: bytes, tim
         raise network_error_from(exc) from None  # classified, fixed wording; never str(exc)
 
 
+@dataclass(frozen=True)
+class ResponseSummary:
+    """Safe description of an error response: shape plus an allowlisted ``code``/``message``.
+
+    The raw body, other JSON fields, headers and cookies are never exposed.
+    """
+
+    shape: str  # json-object | json-other | html | text | empty | other
+    media_type: str  # application/json | text/html | text/plain | other | none
+    size: int  # body size in bytes (a number, not content)
+    code: int | None
+    message: str  # scrubbed, sanitised, truncated; may be empty
+
+    def describe(self) -> str:
+        if self.shape == "json-object" and (self.code is not None or self.message):
+            parts = []
+            if self.code is not None:
+                parts.append(f"API code {self.code}")
+            if self.message:
+                parts.append(f'message "{self.message}"')
+            what = ", ".join(parts)
+        else:
+            what = {
+                "json-object": "a JSON object with no API code or message",
+                "json-other": "JSON that is not an object",
+                "html": "an HTML page, not a JSON API error",
+                "text": "a plain-text body (content not shown)",
+                "empty": "an empty body",
+            }.get(self.shape, "a body in an unrecognised format (content not shown)")
+        return f"{what} [{self.media_type}, {self.size} bytes]"
+
+
+def _media_type(headers: Mapping[str, str]) -> str:
+    raw = next((v for k, v in headers.items() if k.lower() == "content-type"), "")
+    base = raw.split(";", 1)[0].strip().lower()
+    if base in ("application/json", "text/html", "text/plain"):
+        return base
+    return "other" if base else "none"
+
+
+def _as_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"-?[0-9]{1,9}", value.strip()):
+        return int(value)
+    return None
+
+
+def summarise_response(response: HttpResponse, scrub: Callable[[str], str]) -> ResponseSummary:
+    """Describe ``response`` without exposing its body. Only ``code`` and a message key are read."""
+    raw = response.body
+    media_type = _media_type(response.headers)
+    if not raw.strip():
+        return ResponseSummary("empty", media_type, len(raw), None, "")
+    try:
+        text = raw.decode("utf-8")  # strict: undecodable bytes must not be mistaken for text
+    except UnicodeDecodeError:
+        return ResponseSummary("other", media_type, len(raw), None, "")
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        sample = text[:2000]
+        printable = sum(ch.isprintable() or ch in "\r\n\t" for ch in sample) / len(sample)
+        shape = ("html" if media_type == "text/html" or text.lstrip()[:1] == "<"
+                 else "text" if printable > 0.9 else "other")
+        return ResponseSummary(shape, media_type, len(raw), None, "")
+    if not isinstance(payload, dict):
+        return ResponseSummary("json-other", media_type, len(raw), None, "")
+    message = ""
+    for key in _API_MESSAGE_KEYS:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            message = _diagnostic(_OPAQUE_RUN.sub(REDACTED, scrub(value)), _MAX_API_MESSAGE_CHARS)
+            break
+    return ResponseSummary("json-object", media_type, len(raw), _as_int(payload.get("code")), message)
+
+
+def describe_exchange_request(credentials: AuthCredentials, port: int) -> list[str]:
+    """Offline description of the token-exchange request. Sends nothing; prints no secret or hash."""
+    app_id, secret = credentials.app_id, credentials.app_secret
+    odd = re.search(r"[^A-Za-z0-9_-]", app_id) is not None
+    quoted = lambda v: v[:1] in "\"'`" or v[-1:] in "\"'`"  # noqa: E731
+    return [
+        "Token exchange request (offline check; nothing is sent):",
+        f"  request     : POST {AUTH_BASE_URL}{VALIDATE_AUTHCODE_PATH}",
+        "  header      : Content-Type: application/json",
+        f'  JSON fields : grant_type="{GRANT_TYPE}", appIdHash=<64 hex chars>, code=<auth code from the callback>',
+        '  appIdHash   : SHA-256 over "<App ID>:<App Secret>" -- the full App ID exactly as the FYERS dashboard shows it',
+        "App ID checks (the value is never printed):",
+        f"  matches the dashboard format <ID>-<digits> : {'yes' if _APP_ID_SHAPE.fullmatch(app_id) else 'NO'}"
+        + ("" if _APP_ID_SHAPE.fullmatch(app_id) else "   <- a missing '-100'-style suffix changes the hash"),
+        f"  has characters other than letters/digits/-/_: {'YES' if odd else 'no'}",
+        f"  wrapped in quote characters                 : {'YES' if quoted(app_id) else 'no'}",
+        "App Secret checks (the value is never printed):",
+        f"  wrapped in quote characters                 : {'YES' if quoted(secret) else 'no'}",
+        f"Redirect URI the login URL will carry         : {redirect_uri_for(port)}",
+        "  (must equal the redirect URL saved on the FYERS app, character for character)",
+    ]
+
+
 def exchange_auth_code(
     credentials: AuthCredentials,
     auth_code: SecretStr,
@@ -332,7 +439,7 @@ def exchange_auth_code(
     code = auth_code.reveal()
 
     def scrub(text: str) -> str:
-        return credentials.redact(text).replace(code, REDACTED)
+        return credentials.redact(text, code)
 
     body = json.dumps({
         "grant_type": GRANT_TYPE,
@@ -342,28 +449,26 @@ def exchange_auth_code(
     response = transport(f"{base_url.rstrip('/')}{VALIDATE_AUTHCODE_PATH}",
                          {"Content-Type": "application/json"}, body, timeout)
 
-    text = response.body.decode("utf-8", errors="replace")
+    summary = summarise_response(response, scrub)
     try:
-        payload = json.loads(text)
+        payload = json.loads(response.body.decode("utf-8", errors="replace"))
     except ValueError:
         payload = None
-    detail = ""
-    status_code: int | None = None
-    if isinstance(payload, dict):
-        raw_code = payload.get("code")
-        status_code = raw_code if isinstance(raw_code, int) and not isinstance(raw_code, bool) else None
-        detail = _diagnostic(scrub(str(payload.get("message", ""))))
 
     rejected = not 200 <= response.status < 300 or not isinstance(payload, dict) or payload.get("s", "ok") != "ok"
     if rejected:
+        shape_note = "" if _APP_ID_SHAPE.fullmatch(credentials.app_id) else (
+            " Your App ID does not look like the dashboard format <ID>-<digits>; use it exactly as the "
+            "dashboard shows it, including the suffix.")
         raise FyersAuthError(
-            f"token exchange rejected (HTTP {response.status}, code {status_code})"
-            + (f": {detail}" if detail else "")
-            + ". Check the app id/secret and redirect URL, then run the login again.",
-            status=response.status, code=status_code,
+            f"token exchange rejected (HTTP {response.status}): {summary.describe()}."
+            + shape_note
+            + " Check FYERS_APP_ID / FYERS_APP_SECRET and the saved redirect URL, then run the login again "
+              "for a fresh auth code.",
+            status=response.status, code=summary.code,
         )
     token = payload.get("access_token")
     if not isinstance(token, str) or not _ACCESS_TOKEN_RE.fullmatch(token):
         raise FyersApiError("token exchange succeeded but returned no usable access_token "
-                            "(missing or unexpected format)", status=response.status, code=status_code)
+                            "(missing or unexpected format)", status=response.status, code=summary.code)
     return SecretStr(token)

@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import stat
+import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -112,11 +113,18 @@ class AuthCredentials:
         """``SHA256(app_id:app_secret)`` as lowercase hex, as FYERS v3 ``validate-authcode`` requires."""
         return hashlib.sha256(f"{self.app_id}:{self.app_secret}".encode()).hexdigest()
 
-    def redact(self, text: str) -> str:
-        """Remove the secret, the derived hash and the app id from ``text``."""
-        for secret in (self.app_secret, self.app_id_hash, self.app_id):
-            text = text.replace(secret, REDACTED)
-        return text
+    def redact(self, text: str, *extra_secrets: str) -> str:
+        """Remove the secret, the derived hash, the app id (and any ``extra_secrets``) from ``text``.
+
+        Matching is case-insensitive and also covers URL-encoded forms, so an API that echoes a
+        value back upper-cased or percent-encoded is still scrubbed.
+        """
+        variants: set[str] = set()
+        for secret in (self.app_secret, self.app_id_hash, self.app_id, *extra_secrets):
+            if secret:
+                variants |= {secret, urllib.parse.quote(secret, safe=""), urllib.parse.quote_plus(secret)}
+        pattern = re.compile("|".join(re.escape(v) for v in sorted(variants, key=len, reverse=True)), re.IGNORECASE)
+        return pattern.sub(REDACTED, text)
 
 
 def parse_dotenv(text: str) -> dict[str, str]:
