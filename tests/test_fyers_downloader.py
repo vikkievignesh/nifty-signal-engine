@@ -107,14 +107,42 @@ def test_epoch_seconds_are_converted_to_kolkata(tmp_path):
     assert result.csv_path.read_text().splitlines()[1].startswith("2024-01-02T09:15:00+05:30,")
 
 
+
+
 def test_timestamps_shifted_by_the_utc_offset_are_rejected_not_written(tmp_path):
     # If FYERS epochs were "IST-as-UTC", labels would land 5.5h late; validation must catch it.
     shifted = [[1704167100 + 19800 + 300 * i, 100, 101, 99, 100, 0] for i in range(75)]
     with pytest.raises(CandleValidationError, match="outside 09:15"):
-        run(ScriptedTransport(json_response(ok_payload(shifted))), tmp_path,
-            start=date(2024, 1, 2), end=date(2024, 1, 2))
+        run(
+            ScriptedTransport(json_response(ok_payload(shifted))),
+            tmp_path,
+            start=date(2024, 1, 2),
+            end=date(2024, 1, 2),
+        )
     assert not list((tmp_path / "out").glob("*.csv"))
-    assert list((tmp_path / "out" / "raw").glob("*.json"))  # raw kept for debugging
+    assert list((tmp_path / "out" / "raw").glob("*.json"))
+
+
+def test_pre_session_candles_are_excluded_and_counted(tmp_path):
+    start = int(datetime(2024, 1, 2, 9, 5, tzinfo=IST).timestamp())
+    rows = [
+        [start + 300 * i, 100, 101, 99, 100, 0]
+        for i in range(77)
+    ]
+
+    result, _ = run(
+        ScriptedTransport(json_response(ok_payload(rows))),
+        tmp_path,
+        start=date(2024, 1, 2),
+        end=date(2024, 1, 2),
+    )
+
+    labels = result.frame["timestamp"].dt.strftime("%H:%M").tolist()
+    assert len(labels) == 75
+    assert labels[0] == "09:15"
+    assert labels[-1] == "15:25"
+    assert result.metadata["pre_session_candles_dropped"] == 2
+    assert list((tmp_path / "out" / "raw").glob("*.json"))
 
 
 # --- data quality ------------------------------------------------------------------------------

@@ -267,6 +267,12 @@ def download_nifty_5m(
                        len(repeated), shown, sum(duplicates[d]["dropped"] for d in repeated))
     if frame.empty:
         raise NoDataError(f"no complete candles remain for {start}..{end} after filtering")
+    pre_session_candles_dropped = 0
+
+    if not allow_off_hours:
+       pre_session = frame[TIMESTAMP_COL].dt.time < SESSION_OPEN
+       pre_session_candles_dropped = int(pre_session.sum())
+       frame = frame.loc[~pre_session].reset_index(drop=True)
 
     report = validate_candles(frame, check_session_hours=not allow_off_hours)
     report.raise_if_errors()
@@ -296,6 +302,7 @@ def download_nifty_5m(
         "duplicates_by_date": duplicates,
         "out_of_range_dropped": out_of_range,
         "incomplete_candles_dropped": incomplete_dropped,
+        "pre_session_candles_dropped": pre_session_candles_dropped,
         "validation_warnings": report.warnings,
         "volume_source": VolumeSource.INDEX_REPORTED.value,
         "volume_warning": VOLUME_WARNING,
