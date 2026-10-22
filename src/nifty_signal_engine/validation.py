@@ -126,6 +126,28 @@ def validate_candles(
         if mask.any():
             report.errors.append(f"{int(mask.sum())} candles with {name}, first at {_first_bad(df, mask)}")
 
+
+
+
+    # Warn about runs of at least 5 identical consecutive OHLCV candles.
+    if VOLUME_COL in df.columns and pd.api.types.is_numeric_dtype(df[VOLUME_COL]):
+        repeated_cols = list(OHLC_COLS) + [VOLUME_COL]
+        same_values = df[repeated_cols].eq(df[repeated_cols].shift()).all(axis=1)
+        consecutive = ts.diff().eq(pd.Timedelta(minutes=5))
+        continues_run = same_values & consecutive
+
+        run_id = (~continues_run).cumsum()
+        run_sizes = continues_run.groupby(run_id).transform("sum")
+        flagged = continues_run & (run_sizes >= 4)
+
+        if flagged.any():
+            report.warnings.append(
+                f"{int(flagged.sum())} repeated OHLCV transitions "
+                "within runs of at least 5 identical candles"
+            )
+
+
+
     flat = (o == h) & (h == l) & (l == c)
     if flat.any():
         n = int(flat.sum())

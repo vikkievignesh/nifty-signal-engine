@@ -149,3 +149,35 @@ def test_flat_candle_with_inconsistent_neighbour_still_errors():
     df.loc[1, "high"] = df.loc[1, "low"] - 1
     report = validate_candles(df)
     assert not report.ok and any("high < low" in e for e in report.errors)
+
+
+def test_repeated_ohlcv_warning_requires_at_least_five_candles():
+    df = make_candles(
+        "2024-01-02",
+        [100, 101, 101, 101, 102],
+        volume=[10, 20, 20, 20, 30],
+    )
+    for i in (2, 3):
+        df.loc[i, ["open", "high", "low", "close"]] = (
+            df.loc[1, ["open", "high", "low", "close"]].to_numpy()
+        )
+
+    report = validate_candles(df, require_volume=True)
+    assert report.ok, report.errors
+    assert not any("runs of repeated OHLCV" in w for w in report.warnings)
+
+
+def test_repeated_ohlcv_warning_counts_transitions_in_long_run():
+    df = make_candles(
+        "2024-01-02",
+        [100, 101, 101, 101, 101, 101, 102],
+        volume=[10, 20, 20, 20, 20, 20, 30],
+    )
+    for i in range(2, 6):
+        df.loc[i, ["open", "high", "low", "close"]] = (
+            df.loc[1, ["open", "high", "low", "close"]].to_numpy()
+        )
+
+    report = validate_candles(df, require_volume=True)
+    assert report.ok, report.errors
+    assert any("4 repeated OHLCV transitions" in w for w in report.warnings)
