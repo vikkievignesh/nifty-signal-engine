@@ -37,6 +37,7 @@ from ..schema import (
     LOW_COL,
     OPEN_COL,
     SCHEMA_COLUMNS,
+    SESSION_OPEN,
     TIMESTAMP_COL,
     VOLUME_COL,
     VolumeSource,
@@ -59,6 +60,12 @@ VOLUME_WARNING = (
     "traded volume; do not use it for relative-volume research"
 )
 _MIN_EPOCH, _MAX_EPOCH = 1e8, 4e9  # rejects millisecond epochs and garbage
+# The 75 candle labels of a regular session (09:15 .. 15:25), used to recognise a *full* session.
+_SESSION_SLOTS = frozenset(
+    (datetime.combine(date.min, SESSION_OPEN) + i * CANDLE_INTERVAL).time()
+    for i in range(EXPECTED_CANDLES_PER_SESSION)
+)
+_MAX_DATES_IN_WARNING = 10
 
 
 @dataclass(frozen=True)
@@ -127,6 +134,29 @@ def _frame_from_rows(rows: Sequence[Sequence[float]]) -> pd.DataFrame:
     for column in (OPEN_COL, HIGH_COL, LOW_COL, CLOSE_COL, VOLUME_COL):
         frame[column] = raw[column].astype("float64")
     return frame[list(SCHEMA_COLUMNS)]
+
+
+def _duplicates_by_date(
+    frame: pd.DataFrame, same_timestamp: pd.Series, conflict_mask: pd.Series
+) -> dict[str, dict[str, Any]]:
+    """Classify repeated timestamps per IST date (call before the duplicates are dropped).
+
+    ``frame`` is sorted by timestamp and the masks are aligned with it. Per date this reports the rows that
+    will be dropped, how many of them conflict with the first occurrence, and ``full_session_repeat``: True only
+    when the date has no conflicting rows, its timestamps are exactly the 75 regular-session slots, and every
+    one of those timestamps appears exactly twice. Based on counts, so it does not depend on row order/layout.
+    """
+    day = frame[TIMESTAMP_COL].dt.strftime("%Y-%m-%d")
+    report: dict[str, dict[str, Any]] = {}
+    for date_text in sorted(day[same_timestamp].unique()):
+        on_day = day == date_text
+        per_timestamp = frame[on_day].groupby(TIMESTAMP_COL).size()
+        conflicting = int(conflict_mask[on_day].sum())
+        full = (conflicting == 0 and bool((per_timestamp == 2).all())
+                and {stamp.time() for stamp in per_timestamp.index} == _SESSION_SLOTS)
+        report[date_text] = {"dropped": int(same_timestamp[on_day].sum()), "conflicting": conflicting,
+                             "full_session_repeat": full}
+    return report
 
 
 def _write_atomic(path: Path, text: str) -> None:
@@ -215,8 +245,10 @@ def download_nifty_5m(
     frame = frame.sort_values(TIMESTAMP_COL, kind="stable").reset_index(drop=True)
     same_timestamp = frame.duplicated(TIMESTAMP_COL, keep="first")
     identical = frame.duplicated(keep="first")
-    conflicting = int((same_timestamp & ~identical).sum())
+    conflict_mask = same_timestamp & ~identical
+    conflicting = int(conflict_mask.sum())
     duplicates_dropped = int(same_timestamp.sum())
+    duplicates = _duplicates_by_date(frame, same_timestamp, conflict_mask)
     frame = frame[~same_timestamp].reset_index(drop=True)
     if out_of_range:
         logger.warning("dropped %d candles outside the requested date range", out_of_range)
@@ -225,6 +257,14 @@ def download_nifty_5m(
     if duplicates_dropped:
         logger.warning("dropped %d duplicate candle(s), %d with conflicting values (first kept)",
                        duplicates_dropped, conflicting)
+    repeated = [date_text for date_text, entry in duplicates.items() if entry["full_session_repeat"]]
+    if repeated:
+        shown = ", ".join(repeated[:_MAX_DATES_IN_WARNING])
+        if len(repeated) > _MAX_DATES_IN_WARNING:
+            shown += f" and {len(repeated) - _MAX_DATES_IN_WARNING} more"
+        logger.warning("FYERS returned %d full trading session(s) twice (%s) with identical values; dropped %d "
+                       "duplicate candle(s) and kept one copy of each. The raw response is preserved.",
+                       len(repeated), shown, sum(duplicates[d]["dropped"] for d in repeated))
     if frame.empty:
         raise NoDataError(f"no complete candles remain for {start}..{end} after filtering")
 
@@ -253,6 +293,7 @@ def download_nifty_5m(
         "weekdays_without_data_note": "includes exchange holidays; no holiday calendar is applied",
         "duplicates_dropped": duplicates_dropped,
         "conflicting_duplicates": conflicting,
+        "duplicates_by_date": duplicates,
         "out_of_range_dropped": out_of_range,
         "incomplete_candles_dropped": incomplete_dropped,
         "validation_warnings": report.warnings,
