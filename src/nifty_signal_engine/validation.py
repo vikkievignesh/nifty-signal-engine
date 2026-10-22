@@ -126,6 +126,11 @@ def validate_candles(
         if mask.any():
             report.errors.append(f"{int(mask.sum())} candles with {name}, first at {_first_bad(df, mask)}")
 
+    flat = (o == h) & (h == l) & (l == c)
+    if flat.any():
+        n = int(flat.sum())
+        report.warnings.append(f"{n} flat candle{'s' if n != 1 else ''} (open = high = low = close)")
+
     if VOLUME_COL in df.columns:
         vol = df[VOLUME_COL]
         if not pd.api.types.is_numeric_dtype(vol):
@@ -135,6 +140,10 @@ def validate_candles(
                 report.errors.append(f"{int((vol < 0).sum())} candles with negative volume")
             if vol.isna().any():
                 report.warnings.append(f"{int(vol.isna().sum())} candles with missing volume")
+            zero = vol == 0
+            if zero.any():
+                n = int(zero.sum())
+                report.warnings.append(f"{n} candle{'s' if n != 1 else ''} with zero volume")
 
     counts = ts.groupby(session_dates(ts)).size()
     short = counts[counts != EXPECTED_CANDLES_PER_SESSION]

@@ -88,3 +88,64 @@ def test_raise_if_errors():
     df = make_candles("2024-01-02", [100]).drop(columns="close")
     with pytest.raises(CandleValidationError):
         validate_candles(df).raise_if_errors()
+
+
+# --- flat and zero-volume candles are observations (warnings), never errors ---------------------
+
+def _flat_warnings(report):
+    return [w for w in report.warnings if "flat" in w]
+
+
+def _zero_volume_warnings(report):
+    return [w for w in report.warnings if "zero volume" in w]
+
+
+def test_flat_candles_warn_with_count_and_are_not_errors():
+    df = make_candles("2024-01-02", [100, 101, 102, 103])
+    for i in (1, 3):
+        df.loc[i, ["open", "high", "low", "close"]] = 50.0
+    before = df.copy()
+    report = validate_candles(df)
+    assert report.ok, report.errors
+    assert any("2 flat candles" in w for w in _flat_warnings(report))
+    assert _zero_volume_warnings(report) == []
+    pd.testing.assert_frame_equal(df, before, check_exact=True)
+
+
+def test_zero_volume_candles_warn_with_count_and_are_not_errors():
+    df = make_candles("2024-01-02", [100, 101, 102, 103], volume=[10, 0, 5, 0])
+    before = df.copy()
+    report = validate_candles(df, require_volume=True)
+    assert report.ok, report.errors
+    assert any("2 candles with zero volume" in w for w in _zero_volume_warnings(report))
+    assert _flat_warnings(report) == []
+    pd.testing.assert_frame_equal(df, before, check_exact=True)
+
+
+def test_flat_and_zero_volume_together_report_each_count():
+    df = make_candles("2024-01-02", [100, 101, 102], volume=[0, 0, 7])
+    df.loc[0, ["open", "high", "low", "close"]] = 50.0
+    report = validate_candles(df)
+    assert report.ok, report.errors
+    assert any("1 flat candle" in w for w in report.warnings)
+    assert any("2 candles with zero volume" in w for w in report.warnings)
+
+
+def test_normal_candles_raise_neither_warning():
+    df = make_candles("2024-01-02", [100, 101, 102], volume=[10, 20, 30])
+    report = validate_candles(df, require_volume=True)
+    assert report.ok
+    assert _flat_warnings(report) == [] and _zero_volume_warnings(report) == []
+
+
+def test_missing_volume_is_not_counted_as_zero_volume():
+    df = make_candles("2024-01-02", [100, 101], volume=[float("nan"), 5])
+    assert _zero_volume_warnings(validate_candles(df)) == []
+
+
+def test_flat_candle_with_inconsistent_neighbour_still_errors():
+    df = make_candles("2024-01-02", [100, 101])
+    df.loc[0, ["open", "high", "low", "close"]] = 50.0
+    df.loc[1, "high"] = df.loc[1, "low"] - 1
+    report = validate_candles(df)
+    assert not report.ok and any("high < low" in e for e in report.errors)

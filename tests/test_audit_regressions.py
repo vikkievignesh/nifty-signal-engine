@@ -240,3 +240,15 @@ def test_validate_weekend_warns():
 
 def test_candle_close_time_is_open_plus_interval():
     assert candle_close_time(pd.Timestamp("2024-01-02 15:25", tz=IST)) == pd.Timestamp("2024-01-02 15:30", tz=IST)
+
+
+def test_pipeline_accepts_flat_and_zero_volume_candles(synthetic):
+    # Structurally valid data with these observations must flow through unchanged.
+    candles = synthetic.copy()
+    candles.loc[10, ["open", "high", "low", "close"]] = float(candles.loc[10, "open"])
+    candles.loc[20, "volume"] = 0.0
+    before = candles.copy()
+    frame = build_feature_frame(candles, Settings())
+    assert len(frame) == len(candles)
+    assert (frame["timestamp"].to_numpy() == before["timestamp"].to_numpy()).all()
+    pd.testing.assert_frame_equal(candles, before, check_exact=True)
