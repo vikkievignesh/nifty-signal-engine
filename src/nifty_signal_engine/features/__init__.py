@@ -1,7 +1,12 @@
 """Causal feature calculations. Every value at row ``t`` uses only candles <= ``t``
 (and, for CPR, only *previous* completed sessions)."""
 
-from .cpr import compute_cpr, daily_hlc
+from .cpr import (
+    compute_cpr,
+    compute_monthly_cpr,
+    compute_weekly_cpr,
+    daily_hlc,
+)
 from .moving_averages import ema, sma
 from .volume import RelativeVolumeMode, UnsupportedVolumeSourceError, relative_volume
 
